@@ -77,7 +77,9 @@ def run_bot():
     broker = Broker()
     risk = RiskState()
 
-    # Connect
+    # Connect — back off instead of logging the same failure every 15s.
+    delay = 15
+    attempt = 0
     while True:
         try:
             broker.connect()
@@ -87,9 +89,21 @@ def run_bot():
             log.info("Account balance: %s", balance)
             break
         except Exception as e:
-            log.error("Connection failed (%s). Retrying in 15s...", e)
-            state.update(connected=False, last_signal_text="Connection failed: %s" % e)
-            time.sleep(15)
+            attempt += 1
+            text = str(e)
+            if "SSL" in text or "timed out" in text or "Max retries" in text:
+                status = "IQ Option is not reachable from this server (network blocked)."
+            elif "invalid_credentials" in text:
+                status = "IQ Option rejected the login credentials."
+            else:
+                status = "Connection failed: %s" % text
+            if attempt == 1:
+                log.error("%s Retrying with backoff.", status)
+            else:
+                log.info("Still not connected (attempt %d) — next try in %ds.", attempt, delay)
+            state.update(connected=False, last_signal_text=status)
+            time.sleep(delay)
+            delay = min(delay * 2, 300)
 
     last_candle_ts = None
 

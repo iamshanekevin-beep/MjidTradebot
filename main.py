@@ -285,13 +285,14 @@ def run_bot():
                                 log.info("  → not trading (%s), signal logged only", reason)
 
             except Exception as e:
-                log.warning("Error scanning %s: %s — reconnecting", pair, e)
+                state.update(connected=False)
+                log.warning("Error scanning %s: %s", pair, e)
+                # ensure_connected() in broker handles backoff; don't hammer reconnect here
                 try:
-                    broker.connect()
+                    broker.ensure_connected()
                     state.update(connected=True)
                 except Exception:
-                    state.update(connected=False)
-                    log.error("Reconnect failed after %s error", pair)
+                    pass
 
             time.sleep(scan_interval)
 

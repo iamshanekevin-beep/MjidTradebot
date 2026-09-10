@@ -23,6 +23,10 @@ class Broker:
         # IQ Option websocket breaks after ~3 get_candles calls for different
         # pairs.  We reconnect after every 2 to stay safely under the limit.
         self._MAX_CALLS = 2
+        # Exponential backoff for reconnection attempts
+        self._last_reconnect_attempt = 0.0
+        self._reconnect_delay = 5.0
+        self._MAX_RECONNECT_DELAY = 60.0
 
     def connect(self):
         # Properly close old connection so the server releases the session
@@ -51,8 +55,19 @@ class Broker:
 
     def ensure_connected(self):
         if self.api is None or not self.api.check_connect():
-            log.warning("Not connected — reconnecting...")
-            self.connect()
+            now = time.time()
+            elapsed = now - self._last_reconnect_attempt
+            if elapsed < self._reconnect_delay:
+                raise ConnectionError(
+                    f"Reconnect on cooldown ({self._reconnect_delay - elapsed:.0f}s remaining)"
+                )
+            self._last_reconnect_attempt = now
+            try:
+                self.connect()
+                self._reconnect_delay = 5.0  # reset on success
+            except Exception:
+                self._reconnect_delay = min(self._reconnect_delay * 2, self._MAX_RECONNECT_DELAY)
+                raise
 
     def _patch_get_candles(self):
         """Monkey-patch the library's get_candles to prevent infinite retry loops.

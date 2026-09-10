@@ -1,7 +1,4 @@
-import json
 import logging
-import math
-import re
 import time
 from datetime import datetime, timezone
 
@@ -12,44 +9,6 @@ from bot_state import state
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bot")
-
-# The iqoptionapi library logs the raw connection exception at ERROR level on
-# every failed login. We already surface that same reason in our own messages,
-# so drop the duplicate to keep the log readable.
-logging.getLogger("iqoptionapi").setLevel(logging.CRITICAL)
-
-# Substrings identifying a network/TLS reachability problem (IQ Option not
-# routable from this host) as opposed to an application fault such as bad
-# credentials. These are environment conditions, so they log as warnings.
-_UNREACHABLE_HINTS = (
-    "UNEXPECTED_EOF_WHILE_READING",
-    "handshake operation timed out",
-    "Connection reset by peer",
-    "Temporary failure in name resolution",
-    "Name or service not known",
-    "Connection refused",
-    "timed out",
-)
-
-
-def _is_unreachable(exc):
-    """True when the exception looks like IQ Option being unreachable."""
-    text = str(exc)
-    return any(hint in text for hint in _UNREACHABLE_HINTS)
-
-
-def _rate_limit_ttl(exc):
-    """Extract the TTL (seconds) from a requests_limit_exceeded error, or 0."""
-    text = str(exc)
-    if "requests_limit_exceeded" not in text:
-        return 0
-    m = re.search(r'"ttl"\s*:\s*(\d+)', text)
-    return int(m.group(1)) if m else 0
-
-
-def _is_bad_credentials(exc):
-    """True when IQ Option rejected the login as invalid_credentials."""
-    return "invalid_credentials" in str(exc)
 
 
 class RiskState:
@@ -68,12 +27,13 @@ class RiskState:
             self.consecutive_losses = 0
             self.pnl_today = 0.0
 
-    def can_trade(self, daily_loss_limit=None):
+    def can_trade(self):
         self.reset_if_new_day()
         if self.trades_today >= config.MAX_TRADES_PER_DAY:
             return False, "hit MAX_TRADES_PER_DAY"
-        limit = daily_loss_limit if daily_loss_limit is not None else config.DAILY_LOSS_LIMIT
-        if self.pnl_today <= -abs(limit):
+        if self.consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
+            return False, "hit MAX_CONSECUTIVE_LOSSES"
+        if self.pnl_today <= -abs(config.DAILY_LOSS_LIMIT):
             return False, "hit DAILY_LOSS_LIMIT"
         return True, None
 
@@ -83,87 +43,31 @@ class RiskState:
     def record_result(self, result, amount):
         if result == "win":
             self.consecutive_losses = 0
-            self.pnl_today += amount * 0.8  # approximate payout
+            self.pnl_today += amount * 0.8
         elif result == "loss":
             self.consecutive_losses += 1
             self.pnl_today -= amount
 
 
-# ---------------------------------------------------------------------------
-# Helpers for sharing signal/trade data with the dashboard
-# ---------------------------------------------------------------------------
-
-def _to_native(v):
-    if v is None:
-        return None
-    if hasattr(v, "item"):
-        v = v.item()
-    if isinstance(v, float):
-        return round(v, 5) if not (math.isnan(v) or math.isinf(v)) else None
-    if isinstance(v, (int, str, bool)):
-        return v
-    return str(v)
-
-
-def _extract(info, key):
-    if not isinstance(info, dict):
-        return None
-    if key in info:
-        return _to_native(info[key])
-    for v in info.values():
-        if isinstance(v, dict):
-            found = _extract(v, key)
-            if found is not None:
-                return found
-    return None
-
-
-def _signal_entry(direction, info, pair):
-    return {
-        "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
-        "pair": pair,
-        "direction": direction,
-        "price": _extract(info, "price"),
-        "upper_band": _extract(info, "upper_band"),
-        "lower_band": _extract(info, "lower_band"),
-        "candle_dir": _extract(info, "candle_dir"),
-        "reason": _extract(info, "reason"),
-        "summary": "%s | %s" % (pair, _summarize(info)),
-    }
-
-
 def _summarize(info):
     if not isinstance(info, dict):
         return str(info)
-    keys_of_interest = ("price", "reason", "upper_band", "lower_band", "candle_dir")
+    keys_of_interest = ("price", "score", "reason", "upper_band", "lower_band")
     parts = []
     for k in keys_of_interest:
         if k in info:
             v = info[k]
             parts.append(f"{k}={v:.5f}" if isinstance(v, float) else f"{k}={v}")
+    if "fcb" in info:
+        parts.append(f"fcb={_summarize(info['fcb'])}")
+    if "pole_position" in info:
+        parts.append(f"pole_position={_summarize(info['pole_position'])}")
     return " ".join(parts) if parts else str(info)
 
 
-# ---------------------------------------------------------------------------
-# Main bot loop (callable from dashboard.py in a background thread)
-#
-# Scans ONE pair per cycle, rotating through all pairs every 0.5s.
-# This keeps the API request rate at ~2 req/s (well within IQ Option's limits)
-# while still covering all 10 pairs every 5 seconds.
-# ---------------------------------------------------------------------------
-
 def run_bot():
+    """Main bot loop — called from dashboard.py in a background thread."""
     log.info("\n" + config.startup_banner())
-
-    state.update(
-        auto_trade=config.AUTO_TRADE,
-        account_type=config.ACCOUNT_TYPE,
-        trade_amount=config.TRADE_AMOUNT,
-        daily_loss_limit=config.DAILY_LOSS_LIMIT,
-        pairs=list(config.PAIRS),
-        scan_interval=config.SCAN_INTERVAL_SECONDS,
-        cooldown_minutes=config.COOLDOWN_MINUTES,
-    )
 
     if not config.IQ_EMAIL or not config.IQ_PASSWORD:
         log.error("IQ_EMAIL / IQ_PASSWORD are not set.")
@@ -173,227 +77,121 @@ def run_bot():
     broker = Broker()
     risk = RiskState()
 
-    # --- Connect (exponential backoff, quiet after the first few attempts) ---
-    connect_delay = 15
-    MAX_CONNECT_DELAY = 300
-    attempt = 0
+    # Connect
     while True:
         try:
             broker.connect()
             balance = broker.get_balance()
-            state.update(
-                connected=True,
-                balance=balance,
-                last_signal_text="Connected — scanning %d pairs every %ss" % (len(config.PAIRS), config.SCAN_INTERVAL_SECONDS),
-            )
+            state.update(connected=True, balance=balance,
+                         last_signal_text="Connected — scanning %s" % config.PAIR)
             log.info("Account balance: %s", balance)
             break
         except Exception as e:
-            attempt += 1
-            ttl = _rate_limit_ttl(e)
-            if ttl:
-                # IQ Option rate-limited us — wait out the TTL (+buffer) instead
-                # of hammering and extending the ban.
-                connect_delay = min(ttl + 30, MAX_CONNECT_DELAY)
-                log.warning("Rate-limited by IQ Option — waiting %ds before retry.", connect_delay)
-                state.update(connected=False,
-                             last_signal_text="Rate-limited by IQ Option — retrying in %d min…" % (connect_delay // 60))
-            elif _is_bad_credentials(e):
-                # Wrong credentials — retrying won't help, and will trigger rate
-                # limits. Wait a long time before trying again (in case the user
-                # updates the password via the Secrets page).
-                connect_delay = MAX_CONNECT_DELAY
-                log.error("IQ Option rejected credentials (invalid email/password). "
-                          "Update IQ_EMAIL/IQ_PASSWORD on the Secrets page, then restart.")
-                state.update(connected=False,
-                             last_signal_text="❌ Invalid credentials — update email/password on the Secrets page")
-            elif _is_unreachable(e):
-                # Environment condition, not an app fault: IQ Option is not
-                # reachable from this host. Say so once, plainly, then stay quiet.
-                if attempt == 1:
-                    log.warning(
-                        "IQ Option is not reachable from this host (%s). "
-                        "The bot will keep retrying with backoff and the dashboard "
-                        "will show Disconnected until outbound access is available.", e
-                    )
-                else:
-                    log.info("Still unreachable — retrying in %ds (attempt %d)", connect_delay, attempt)
-                state.update(connected=False,
-                             last_signal_text="IQ Option unreachable from this host — retrying…")
-            else:
-                # A real failure (e.g. rejected credentials) deserves attention.
-                msg = "Connection failed (%s). Retrying in %ds..." % (e, connect_delay)
-                if attempt == 1:
-                    log.error(msg)
-                else:
-                    log.warning("%s (attempt %d)", msg, attempt)
-                state.update(connected=False, last_signal_text="Connection failed: %s" % e)
-            time.sleep(connect_delay)
-            connect_delay = min(connect_delay * 2, MAX_CONNECT_DELAY)
+            log.error("Connection failed (%s). Retrying in 15s...", e)
+            state.update(connected=False, last_signal_text="Connection failed: %s" % e)
+            time.sleep(15)
 
-    # --- State ---
-    last_candle_ts = {}        # {pair: last processed candle timestamp}
-    pending_trade = None        # {order_id, pair, direction, amount, trade_entry, complete_at}
-    cooldown_until = None       # epoch timestamp or None
-    last_balance_check = 0.0
-    pair_index = 0
-    scan_interval = config.SCAN_INTERVAL_SECONDS
+    last_candle_ts = None
 
-    # --- Main loop ---
+    # Main loop
     while True:
         try:
-            now = time.time()
-
-            # Dashboard pause
             if state.paused:
-                time.sleep(scan_interval)
+                time.sleep(config.POLL_SECONDS)
                 continue
 
-            # --- Cooldown management ---
-            if cooldown_until:
-                if now >= cooldown_until:
-                    cooldown_until = None
-                    risk.consecutive_losses = 0
-                    state.update(cooldown_until=None, cooldown_remaining=0, consecutive_losses=0,
-                                 last_signal_text="Cooldown ended — resuming trading")
-                    log.info("Cooldown ended — resuming trading")
-                else:
-                    remaining = int(cooldown_until - now)
-                    state.update(cooldown_remaining=remaining)
+            df = broker.get_candles_df()
+            if df.empty:
+                time.sleep(config.POLL_SECONDS)
+                continue
 
-            # --- Check pending trade result ---
-            if pending_trade and now >= pending_trade["complete_at"]:
-                result = broker.get_trade_result(pending_trade["order_id"])
-                risk.record_result(result, pending_trade["amount"])
+            latest_ts = df["timestamp"].iloc[-1]
+            if latest_ts == last_candle_ts:
+                time.sleep(config.POLL_SECONDS)
+                continue
+            last_candle_ts = latest_ts
 
-                pending_trade["trade_entry"]["result"] = result
-                pending_trade["trade_entry"]["pnl"] = round(risk.pnl_today, 2)
+            direction, info = strategy.get_signal(df)
 
-                completed = [t for t in state.trades if t.get("result") in ("win", "loss")]
-                wins = [t for t in completed if t["result"] == "win"]
-                state.update(
-                    daily_pnl=risk.pnl_today,
-                    trades_today=risk.trades_today,
-                    consecutive_losses=risk.consecutive_losses,
-                    win_rate=(len(wins) / len(completed) * 100) if completed else 0.0,
-                )
-                state.pnl_history.append(risk.pnl_today)
+            signal_text = "%s | %s" % (config.PAIR, _summarize(info))
+            state.update(last_signal_text=signal_text, active_pair=config.PAIR)
+            state.add_signal({
+                "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+                "pair": config.PAIR,
+                "direction": direction,
+                "summary": signal_text,
+            })
 
-                log.info("Trade result: %s on %s | daily P&L: %.2f", result, pending_trade["pair"], risk.pnl_today)
+            if direction is None:
+                log.info("No signal. %s", _summarize(info))
+                time.sleep(config.POLL_SECONDS)
+                continue
 
-                # Trigger cooldown after 3 consecutive losses
-                if risk.consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
-                    cooldown_until = now + config.COOLDOWN_MINUTES * 60
-                    state.update(cooldown_until=cooldown_until,
-                                 last_signal_text="3 consecutive losses — %d-min cooldown" % config.COOLDOWN_MINUTES)
-                    log.info("3 consecutive losses — %d-minute cooldown started", config.COOLDOWN_MINUTES)
+            log.info("Signal: %s | %s", direction, _summarize(info))
 
-                pending_trade = None
+            if not state.auto_trade:
+                log.info("AUTO_TRADE is off — signal logged only.")
+                time.sleep(config.POLL_SECONDS)
+                continue
 
-            # --- Refresh balance periodically ---
-            if now - last_balance_check > 30:
-                try:
-                    bal = broker.get_balance()
-                    state.update(balance=bal)
-                    last_balance_check = now
-                except Exception:
-                    pass
+            can_trade, reason = risk.can_trade()
+            if not can_trade:
+                log.warning("Trade skipped — risk control: %s", reason)
+                time.sleep(config.POLL_SECONDS)
+                continue
 
-            # --- Scan ONE pair this cycle (rotate through all pairs) ---
-            pair = config.PAIRS[pair_index % len(config.PAIRS)]
-            pair_index += 1
+            amount = state.trade_amount
+            success, order_id = broker.place_trade(direction, amount=amount)
+            risk.record_trade(amount)
 
-            in_cooldown = cooldown_until is not None and now < cooldown_until
-            can_trade = (state.auto_trade and not pending_trade and not in_cooldown)
+            trade_entry = {
+                "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+                "direction": direction,
+                "amount": amount,
+                "pair": config.PAIR,
+                "expiration": config.EXPIRATION_MINUTES,
+                "order_id": order_id if success else None,
+                "result": "pending" if success else "failed",
+                "pnl": None,
+            }
+            state.add_trade(trade_entry)
 
-            if can_trade:
-                ok, reason = risk.can_trade(state.daily_loss_limit)
-                if not ok:
-                    can_trade = False
+            if not success:
+                log.error("Trade failed: %s", order_id)
+                time.sleep(config.POLL_SECONDS)
+                continue
 
-            try:
-                df = broker.get_candles_df(pair=pair)
-                if not df.empty:
-                    latest_ts = df["timestamp"].iloc[-1]
-                    if latest_ts != last_candle_ts.get(pair):
-                        last_candle_ts[pair] = latest_ts
+            log.info("Trade placed: %s amount=%s order_id=%s", direction, amount, order_id)
 
-                        direction, info = strategy.get_signal(df)
-                        entry = _signal_entry(direction, info, pair)
-                        state.add_signal(entry)
-                        state.update(last_signal_text=entry["summary"], active_pair=pair)
+            time.sleep(config.EXPIRATION_MINUTES * 60 + 5)
+            result = broker.get_trade_result(order_id)
+            risk.record_result(result, amount)
 
-                        if direction is None:
-                            log.info("No clean signal on %s. %s", pair, _summarize(info))
-                        else:
-                            log.info("★ Clean signal on %s: %s | %s", pair, direction, _summarize(info))
+            trade_entry["result"] = result
+            trade_entry["pnl"] = round(risk.pnl_today, 2)
 
-                            if can_trade:
-                                # Place trade — base stake only, no martingale
-                                amount = state.trade_amount
-                                success, order_id = broker.place_trade(direction, amount=amount, pair=pair)
-                                risk.record_trade(amount)
+            completed = [t for t in state.trades if t.get("result") in ("win", "loss")]
+            wins = [t for t in completed if t["result"] == "win"]
+            state.update(
+                daily_pnl=risk.pnl_today,
+                trades_today=risk.trades_today,
+                consecutive_losses=risk.consecutive_losses,
+                win_rate=(len(wins) / len(completed) * 100) if completed else 0.0,
+            )
+            state.pnl_history.append(risk.pnl_today)
 
-                                trade_entry = {
-                                    "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
-                                    "direction": direction,
-                                    "amount": amount,
-                                    "pair": pair,
-                                    "expiration": config.EXPIRATION_MINUTES,
-                                    "order_id": order_id if success else None,
-                                    "result": "pending" if success else "failed",
-                                    "pnl": None,
-                                }
-                                state.add_trade(trade_entry)
-
-                                if success:
-                                    log.info("✓ Trade placed: %s %s amount=%s order_id=%s", direction, pair, amount, order_id)
-                                    pending_trade = {
-                                        "order_id": order_id,
-                                        "pair": pair,
-                                        "direction": direction,
-                                        "amount": amount,
-                                        "trade_entry": trade_entry,
-                                        "complete_at": time.time() + config.EXPIRATION_MINUTES * 60 + 5,
-                                    }
-                                else:
-                                    log.error("Trade failed on %s: %s", pair, order_id)
-                            else:
-                                reason = ("auto_trade off" if not state.auto_trade
-                                          else "pending trade" if pending_trade
-                                          else "cooldown" if in_cooldown
-                                          else "risk control")
-                                log.info("  → not trading (%s), signal logged only", reason)
-
-            except Exception as e:
-                state.update(connected=False)
-                log.warning("Error scanning %s: %s", pair, e)
-                # ensure_connected() in broker handles backoff; don't hammer reconnect here
-                try:
-                    broker.ensure_connected()
-                    state.update(connected=True)
-                except Exception:
-                    pass
-
-            time.sleep(scan_interval)
+            log.info("Trade result: %s | daily P&L (approx): %.2f", result, risk.pnl_today)
 
         except Exception as e:
-            if _is_unreachable(e):
-                log.warning("Connection lost (%s). Reconnecting in 15s...", e)
-            else:
-                log.error("Error in main loop: %s. Reconnecting in 15s...", e)
-            state.update(connected=False, last_signal_text="Error: %s. Reconnecting…" % e)
-            pending_trade = None
+            log.error("Error in main loop: %s. Reconnecting in 15s...", e)
+            state.update(connected=False, last_signal_text="Error: %s" % e)
             time.sleep(15)
             try:
                 broker.connect()
                 bal = broker.get_balance()
                 state.update(connected=True, balance=bal)
             except Exception as e2:
-                if _is_unreachable(e2):
-                    log.warning("Reconnect failed — still unreachable")
-                else:
-                    log.error("Reconnect failed: %s", e2)
+                log.error("Reconnect failed: %s", e2)
 
 
 if __name__ == "__main__":

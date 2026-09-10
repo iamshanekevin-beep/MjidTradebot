@@ -24,14 +24,14 @@ class BotState:
         self.daily_loss_limit = config.DAILY_LOSS_LIMIT
 
         # Scanning
-        self.pairs = list(config.PAIRS)
+        self.pairs = [config.PAIR]
         self.active_pair = None
-        self.scan_interval = config.SCAN_INTERVAL_SECONDS
+        self.scan_interval = config.POLL_SECONDS
 
         # Cooldown
         self.cooldown_until = None       # epoch timestamp or None
         self.cooldown_remaining = 0      # seconds remaining (for display)
-        self.cooldown_minutes = config.COOLDOWN_MINUTES
+        self.cooldown_minutes = 15
 
         # Static settings (display only)
         self.strategy = config.STRATEGY

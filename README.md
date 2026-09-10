@@ -34,7 +34,7 @@ trust the defaults blindly either — check them.
    Variables** section (you'll see it alongside where `IQ_EMAIL` /
    `IQ_PASSWORD` are configured).
 3. Explicitly set:
-   - `AUTO_TRADE` = `false`
+   - `AUTO_TRADE` = `true`
    - `TRADE_AMOUNT` = `1` (or whatever small amount you intend)
    - `ACCOUNT_TYPE` = `PRACTICE`
 4. **Do not add `IQ_EMAIL` / `IQ_PASSWORD` yet.** Deploy first without

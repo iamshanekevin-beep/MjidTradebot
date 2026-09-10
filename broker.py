@@ -19,30 +19,91 @@ log = logging.getLogger("broker")
 
 
 def _parse_proxy():
-    """Read IQ_PROXY env var and return proxy dict or None."""
-    raw = os.environ.get("IQ_PROXY")
+    """Read IQ_PROXY env var and return proxy dict or None.
+
+    Supports these formats:
+      - host:port:user:pass   (colon-separated, no scheme, no @)
+      - user:pass@host:port   (no scheme)
+      - http://user:pass@host:port
+      - socks5://host:port
+      - socks5://user:pass@host:port
+    """
+    raw = os.environ.get("IQ_PROXY", "").strip()
     if not raw:
         return None
-    if "://" not in raw:
-        raw = "http://" + raw
-    try:
-        p = urlparse(raw)
-    except Exception as e:
-        log.error("IQ_PROXY URL could not be parsed (%s): %s", e, raw)
+
+    scheme = "http"
+
+    # Strip scheme prefix (handles both "scheme://" and "scheme:")
+    if "://" in raw:
+        scheme, raw = raw.split("://", 1)
+        raw = raw.strip()
+    elif ":" in raw and raw.split(":", 1)[0].lower() in ("http", "https", "socks5", "socks4"):
+        scheme, raw = raw.split(":", 1)
+        raw = raw.strip()
+
+    # If there's an @ sign, split into two parts and figure out which is auth
+    if "@" in raw:
+        left, right = raw.rsplit("@", 1)
+
+        def _try_host_port(s):
+            """Parse 'host:port' — return (host, port) or None."""
+            if ":" not in s:
+                return None
+            h, p = s.rsplit(":", 1)
+            try:
+                return (h, int(p))
+            except ValueError:
+                return None
+
+        def _try_auth(s):
+            """Parse 'user:pass' or 'user' — return (user, pass) or None."""
+            if ":" in s:
+                u, p = s.split(":", 1)
+                return (u, p)
+            if s:
+                return (s, "")
+            return None
+
+        # Try user:pass@host:port (standard)
+        auth = _try_auth(left)
+        hp = _try_host_port(right)
+        if auth and hp:
+            return {"scheme": scheme, "host": hp[0], "port": hp[1], "auth": auth}
+
+        # Try host:port@user:pass (reversed)
+        hp = _try_host_port(left)
+        auth = _try_auth(right)
+        if hp and auth:
+            return {"scheme": scheme, "host": hp[0], "port": hp[1], "auth": auth}
+
+        log.error("IQ_PROXY with @ could not be parsed")
         return None
-    scheme = p.scheme or "http"
-    host = p.hostname
-    try:
-        port = p.port or (1080 if scheme.startswith("socks") else 8080)
-    except ValueError as e:
-        log.error("IQ_PROXY has an invalid port (%s). Expected format: "
-                  "http://user:pass@host:port or socks5://host:port", e)
+
+    # No @ sign — could be host:port:user:pass or host:port
+    colons = raw.count(":")
+    if colons >= 3:
+        # host:port:user:pass
+        parts = raw.split(":")
+        host, port_str, user, password = parts[0], parts[1], parts[2], ":".join(parts[3:])
+    elif colons == 1:
+        # host:port
+        host, port_str = raw.split(":", 1)
+        user, password = "", ""
+    elif colons == 0:
+        host, port_str = raw, ""
+        user, password = "", ""
+    else:
+        log.error("IQ_PROXY could not be parsed (colons=%d)", colons)
         return None
-    auth = None
-    if p.username and p.password:
-        auth = (p.username, p.password)
-    elif p.username:
-        auth = (p.username, "")
+
+    try:
+        port = int(port_str) if port_str else (1080 if scheme.startswith("socks") else 8080)
+    except ValueError:
+        log.error("IQ_PROXY invalid port '%s'", port_str)
+        return None
+
+    auth = (user, password) if user else None
     return {"scheme": scheme, "host": host, "port": port, "auth": auth}
 
 

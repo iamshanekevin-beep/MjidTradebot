@@ -133,7 +133,10 @@ def run_bot():
     broker = Broker()
     risk = RiskState()
 
-    # --- Connect ---
+    # --- Connect (exponential backoff, quiet after the first few attempts) ---
+    connect_delay = 15
+    MAX_CONNECT_DELAY = 300
+    attempt = 0
     while True:
         try:
             broker.connect()
@@ -146,9 +149,16 @@ def run_bot():
             log.info("Account balance: %s", balance)
             break
         except Exception as e:
-            log.error("Connection failed (%s). Retrying in 15s...", e)
+            attempt += 1
+            # Log loudly for the first 3 attempts, then downgrade to avoid log spam
+            msg = "Connection failed (%s). Retrying in %ds..." % (e, connect_delay)
+            if attempt <= 3:
+                log.error(msg)
+            else:
+                log.warning("%s (attempt %d)", msg, attempt)
             state.update(connected=False, last_signal_text="Connection failed: %s" % e)
-            time.sleep(15)
+            time.sleep(connect_delay)
+            connect_delay = min(connect_delay * 2, MAX_CONNECT_DELAY)
 
     # --- State ---
     last_candle_ts = {}        # {pair: last processed candle timestamp}

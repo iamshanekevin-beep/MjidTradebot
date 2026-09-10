@@ -16,6 +16,25 @@ log = logging.getLogger("bot")
 # so drop the duplicate to keep the log readable.
 logging.getLogger("iqoptionapi").setLevel(logging.CRITICAL)
 
+# Substrings identifying a network/TLS reachability problem (IQ Option not
+# routable from this host) as opposed to an application fault such as bad
+# credentials. These are environment conditions, so they log as warnings.
+_UNREACHABLE_HINTS = (
+    "UNEXPECTED_EOF_WHILE_READING",
+    "handshake operation timed out",
+    "Connection reset by peer",
+    "Temporary failure in name resolution",
+    "Name or service not known",
+    "Connection refused",
+    "timed out",
+)
+
+
+def _is_unreachable(exc):
+    """True when the exception looks like IQ Option being unreachable."""
+    text = str(exc)
+    return any(hint in text for hint in _UNREACHABLE_HINTS)
+
 
 class RiskState:
     def __init__(self):
@@ -155,15 +174,29 @@ def run_bot():
             break
         except Exception as e:
             attempt += 1
-            # Log the reason once at ERROR, then downgrade: repeated identical
-            # failures (e.g. IQ Option unreachable from this network) are not
-            # new information and would otherwise flood the log.
-            msg = "Connection failed (%s). Retrying in %ds..." % (e, connect_delay)
-            if attempt == 1:
-                log.error(msg)
+            if _is_unreachable(e):
+                # Environment condition, not an app fault: IQ Option is not
+                # reachable from this host. Say so once, plainly, then stay quiet.
+                if attempt == 1:
+                    log.warning(
+                        "IQ Option is not reachable from this host (%s). "
+                        "The bot will keep retrying with backoff and the dashboard "
+                        "will show Disconnected until outbound access is available.", e
+                    )
+                else:
+                    log.info("Still unreachable — retrying in %ds (attempt %d)", connect_delay, attempt)
             else:
-                log.warning("%s (attempt %d)", msg, attempt)
-            state.update(connected=False, last_signal_text="Connection failed: %s" % e)
+                # A real failure (e.g. rejected credentials) deserves attention.
+                msg = "Connection failed (%s). Retrying in %ds..." % (e, connect_delay)
+                if attempt == 1:
+                    log.error(msg)
+                else:
+                    log.warning("%s (attempt %d)", msg, attempt)
+            if _is_unreachable(e):
+                state.update(connected=False,
+                             last_signal_text="IQ Option unreachable from this host — retrying…")
+            else:
+                state.update(connected=False, last_signal_text="Connection failed: %s" % e)
             time.sleep(connect_delay)
             connect_delay = min(connect_delay * 2, MAX_CONNECT_DELAY)
 
@@ -314,7 +347,10 @@ def run_bot():
             time.sleep(scan_interval)
 
         except Exception as e:
-            log.error("Error in main loop: %s. Reconnecting in 15s...", e)
+            if _is_unreachable(e):
+                log.warning("Connection lost (%s). Reconnecting in 15s...", e)
+            else:
+                log.error("Error in main loop: %s. Reconnecting in 15s...", e)
             state.update(connected=False, last_signal_text="Error: %s. Reconnecting…" % e)
             pending_trade = None
             time.sleep(15)
@@ -323,7 +359,10 @@ def run_bot():
                 bal = broker.get_balance()
                 state.update(connected=True, balance=bal)
             except Exception as e2:
-                log.error("Reconnect failed: %s", e2)
+                if _is_unreachable(e2):
+                    log.warning("Reconnect failed — still unreachable")
+                else:
+                    log.error("Reconnect failed: %s", e2)
 
 
 if __name__ == "__main__":

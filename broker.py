@@ -162,6 +162,9 @@ _patch_library_for_proxy()
 # point it at any of config.IQ_HOSTS (they serve the same API).
 _HOST_OVERRIDE = None
 
+# Host pairs proven unreachable from this network; skipped on later attempts.
+_UNROUTABLE_HOSTS = set()
+
 
 def _patch_library_host():
     from iqoptionapi.api import IQOptionAPI
@@ -228,6 +231,11 @@ class Broker:
             return (api_host, ws_host, auth_host)
 
         hosts = [_split(h) for h in (config.IQ_HOSTS or ["iqoption.com"])]
+        # Skip hosts already found unroutable (e.g. blocked by the proxy), but
+        # never skip all of them.
+        routable = [h for h in hosts if h not in _UNROUTABLE_HOSTS]
+        if routable:
+            hosts = routable
         # Prefer the host pair that worked last time
         if _HOST_OVERRIDE in hosts:
             hosts = [_HOST_OVERRIDE] + [h for h in hosts if h != _HOST_OVERRIDE]
@@ -243,7 +251,16 @@ class Broker:
             if check:
                 break
             last_reason = reason
-            log.warning("Login via %s failed: %s", host[0], reason)
+            # A network-level failure means this host isn't reachable from here
+            # at all (blocked domain / proxy route) — stop retrying it.
+            if any(s in str(reason) for s in ("Host unreachable", "unreachable",
+                                              "Name or service not known",
+                                              "Connection closed unexpectedly")):
+                if host not in _UNROUTABLE_HOSTS:
+                    log.warning("Host %s is unreachable from this network — skipping it", host[0])
+                    _UNROUTABLE_HOSTS.add(host)
+            else:
+                log.warning("Login via %s failed: %s", host[0], reason)
         else:
             _HOST_OVERRIDE = None
             raise ConnectionError(f"IQ Option login failed: {last_reason}")

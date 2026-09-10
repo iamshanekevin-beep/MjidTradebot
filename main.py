@@ -11,6 +11,11 @@ from bot_state import state
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bot")
 
+# The iqoptionapi library logs the raw connection exception at ERROR level on
+# every failed login. We already surface that same reason in our own messages,
+# so drop the duplicate to keep the log readable.
+logging.getLogger("iqoptionapi").setLevel(logging.CRITICAL)
+
 
 class RiskState:
     def __init__(self):
@@ -150,9 +155,11 @@ def run_bot():
             break
         except Exception as e:
             attempt += 1
-            # Log loudly for the first 3 attempts, then downgrade to avoid log spam
+            # Log the reason once at ERROR, then downgrade: repeated identical
+            # failures (e.g. IQ Option unreachable from this network) are not
+            # new information and would otherwise flood the log.
             msg = "Connection failed (%s). Retrying in %ds..." % (e, connect_delay)
-            if attempt <= 3:
+            if attempt == 1:
                 log.error(msg)
             else:
                 log.warning("%s (attempt %d)", msg, attempt)

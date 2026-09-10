@@ -5,14 +5,76 @@ and can break when IQ Option changes their backend. If connect/fetch/trade
 calls start failing, this is the file to check/patch first.
 """
 import logging
+import os
 import time
+from urllib.parse import urlparse
 
 import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
+from iqoptionapi.api import IQOptionAPI
 
 import config
 
 log = logging.getLogger("broker")
+
+# ---------------------------------------------------------------------------
+# Proxy support — IQ Option blocks direct connections from many server IPs.
+# Set IQ_PROXY in the environment (e.g. http://user:pass@host:port) to route
+# both the HTTP login and the WebSocket through a proxy.
+# ---------------------------------------------------------------------------
+_PROXY_URL = os.getenv("IQ_PROXY", "").strip()
+_PROXY_DICT = None
+if _PROXY_URL:
+    _PROXY_DICT = {"http": _PROXY_URL, "https": _PROXY_URL}
+    _parsed = urlparse(_PROXY_URL)
+    _WS_PROXY_KW = {}
+    if _parsed.hostname:
+        _WS_PROXY_KW["http_proxy_host"] = _parsed.hostname
+    if _parsed.port:
+        _WS_PROXY_KW["http_proxy_port"] = _parsed.port
+    if _parsed.username:
+        import base64
+        cred = f"{_parsed.username}:{_parsed.password or ''}"
+        _WS_PROXY_KW["http_proxy_auth"] = (
+            _parsed.username,
+            _parsed.password or "",
+        )
+
+    # Patch IQOptionAPI.__init__ so HTTP requests use the proxy
+    _orig_init = IQOptionAPI.__init__
+    def _patched_init(self, host, username, password, proxies=None):
+        _orig_init(self, host, username, password, proxies or _PROXY_DICT)
+    IQOptionAPI.__init__ = _patched_init
+
+    # Patch start_websocket so the WebSocket also uses the proxy
+    _orig_start_ws = IQOptionAPI.start_websocket
+    def _patched_start_ws(self):
+        global_value = __import__("iqoptionapi.global_value", fromlist=["global_value"])
+        global_value.check_websocket_if_connect = None
+        global_value.check_websocket_if_error = False
+        global_value.websocket_error_reason = None
+        from iqoptionapi.ws.client import WebsocketClient
+        self.websocket_client = WebsocketClient(self)
+        import ssl
+        self.websocket_thread = __import__("threading").Thread(
+            target=self.websocket.run_forever,
+            kwargs={"sslopt": {"check_hostname": False, "cert_reqs": ssl.CERT_NONE, "ca_certs": "cacert.pem"},
+                    **_WS_PROXY_KW},
+        )
+        self.websocket_thread.daemon = True
+        self.websocket_thread.start()
+        while True:
+            if global_value.check_websocket_if_error:
+                return False, global_value.websocket_error_reason
+            if global_value.check_websocket_if_connect == 0:
+                return False, "Websocket connection closed."
+            elif global_value.check_websocket_if_connect == 1:
+                return True, None
+    IQOptionAPI.start_websocket = _patched_start_ws
+
+    log.info("Proxy enabled: %s:%s", _parsed.hostname, _parsed.port)
+else:
+    log.info("No proxy configured (IQ_PROXY not set) — connecting directly.")
 
 
 class Broker:

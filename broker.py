@@ -19,8 +19,8 @@ log = logging.getLogger("broker")
 
 
 def _parse_proxy():
-    """Read IQ_PROXY (or HTTPS_PROXY) env var and return (host, port, scheme, auth) or None."""
-    raw = os.environ.get("IQ_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    """Read IQ_PROXY env var and return proxy dict or None."""
+    raw = os.environ.get("IQ_PROXY")
     if not raw:
         return None
     if "://" not in raw:
@@ -38,8 +38,51 @@ def _parse_proxy():
 
 
 _PROXY = _parse_proxy()
-if _PROXY:
-    log.info("Proxy configured: %s://%s:%d", _PROXY["scheme"], _PROXY["host"], _PROXY["port"])
+
+
+def _patch_library_for_proxy():
+    """Patch iqoptionapi + websocket-client at class level to tunnel through IQ_PROXY."""
+    if not _PROXY:
+        return
+
+    p = _PROXY
+    proxy_url = "%s://%s:%d" % (p["scheme"], p["host"], p["port"])
+    if p["auth"]:
+        proxy_url = "%s://%s:%s@%s:%d" % (
+            p["scheme"], p["auth"][0], p["auth"][1], p["host"], p["port"])
+
+    log.info("Proxy configured: %s://%s:%d", p["scheme"], p["host"], p["port"])
+
+    # 1) Patch IQOptionAPI.__init__ to set proxy on the requests session.
+    #    The library sets trust_env=False, so env-var proxies are ignored —
+    #    we must set session.proxies explicitly.
+    from iqoptionapi.api import IQOptionAPI
+    _orig_init = IQOptionAPI.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        self.session.proxies = {"http": proxy_url, "https": proxy_url}
+
+    IQOptionAPI.__init__ = _patched_init
+
+    # 2) Patch WebSocketApp.run_forever to inject proxy kwargs.  The library
+    #    calls run_forever(sslopt=...) — we add http_proxy_host/port before it runs.
+    from websocket import WebSocketApp
+    _orig_rf = WebSocketApp.run_forever
+
+    def _patched_run_forever(self, **kwargs):
+        kwargs.setdefault("http_proxy_host", p["host"])
+        kwargs.setdefault("http_proxy_port", p["port"])
+        if p["scheme"].startswith("socks"):
+            kwargs.setdefault("proxy_type", "socks5" if "5" in p["scheme"] else "socks4")
+        if p["auth"]:
+            kwargs.setdefault("http_proxy_auth", p["auth"])
+        return _orig_rf(self, **kwargs)
+
+    WebSocketApp.run_forever = _patched_run_forever
+
+
+_patch_library_for_proxy()
 
 
 class Broker:
@@ -66,11 +109,6 @@ class Broker:
             time.sleep(1)  # let the server close the old websocket session
 
         self.api = IQ_Option(config.IQ_EMAIL, config.IQ_PASSWORD)
-
-        # --- Apply proxy if configured ---
-        if _PROXY:
-            self._apply_proxy()
-
         check, reason = self.api.connect()
         if not check:
             raise ConnectionError(f"IQ Option login failed: {reason}")
@@ -79,34 +117,6 @@ class Broker:
         self._patch_get_candles()
         log.info("Connected to IQ Option (%s account)", config.ACCOUNT_TYPE)
         return True
-
-    def _apply_proxy(self):
-        """Route both the HTTP login session and the websocket through IQ_PROXY."""
-        p = _PROXY
-        proxy_url = "%s://%s:%d" % (p["scheme"], p["host"], p["port"])
-        if p["auth"]:
-            proxy_url = "%s://%s:%s@%s:%d" % (p["scheme"], p["auth"][0], p["auth"][1], p["host"], p["port"])
-
-        # 1) HTTP requests session (used for login)
-        try:
-            self.api.api.session.proxies = {"http": proxy_url, "https": proxy_url}
-            log.info("HTTP session routed through proxy")
-        except Exception as e:
-            log.warning("Could not set HTTP proxy on session: %s", e)
-
-        # 2) Websocket — monkey-patch run_forever to inject proxy kwargs
-        original_run_forever = self.api.api.websocket.run_forever
-
-        def patched_run_forever(**kwargs):
-            kwargs.setdefault("http_proxy_host", p["host"])
-            kwargs.setdefault("http_proxy_port", p["port"])
-            if p["scheme"].startswith("socks"):
-                kwargs.setdefault("proxy_type", "socks5" if "5" in p["scheme"] else "socks4")
-            if p["auth"]:
-                kwargs.setdefault("http_proxy_auth", p["auth"])
-            return original_run_forever(**kwargs)
-
-        self.api.api.websocket.run_forever = patched_run_forever
 
     def get_balance(self):
         self.ensure_connected()

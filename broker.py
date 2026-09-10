@@ -116,10 +116,13 @@ def _patch_library_for_proxy():
         return
 
     p = _PROXY
-    proxy_url = "%s://%s:%d" % (p["scheme"], p["host"], p["port"])
+    # socks5h makes the PROXY resolve DNS, which is required when the local
+    # resolver cannot see the target host.
+    req_scheme = "socks5h" if p["scheme"] == "socks5" else p["scheme"]
+    proxy_url = "%s://%s:%d" % (req_scheme, p["host"], p["port"])
     if p["auth"]:
         proxy_url = "%s://%s:%s@%s:%d" % (
-            p["scheme"], p["auth"][0], p["auth"][1], p["host"], p["port"])
+            req_scheme, p["auth"][0], p["auth"][1], p["host"], p["port"])
 
     log.info("Proxy configured: %s://%s:%d", p["scheme"], p["host"], p["port"])
 
@@ -155,6 +158,43 @@ def _patch_library_for_proxy():
 _patch_library_for_proxy()
 
 
+# The library hardcodes "iqoption.com" inside IQ_Option.connect(); this lets us
+# point it at any of config.IQ_HOSTS (they serve the same API).
+_HOST_OVERRIDE = None
+
+
+def _patch_library_host():
+    from iqoptionapi.api import IQOptionAPI
+    _orig_init = IQOptionAPI.__init__
+
+    def _patched_init(self, host, *args, **kwargs):
+        _orig_init(self, host, *args, **kwargs)
+        if _HOST_OVERRIDE:
+            api_host, ws_host, _ = _HOST_OVERRIDE
+            self.https_url = "https://%s/api" % api_host
+            self.wss_url = "wss://%s/echo/websocket" % ws_host
+
+    IQOptionAPI.__init__ = _patched_init
+
+    # The Login resource hardcodes auth.iqoption.com, which some proxies cannot
+    # reach — send it to the auth host of the pair we're currently trying.
+    from iqoptionapi.http.login import Login
+    _orig_post = Login._post
+
+    def _patched_post(self, data=None, headers=None):
+        if _HOST_OVERRIDE:
+            return self.api.send_http_request_v2(
+                method="POST",
+                url="https://%s/api/v2/login" % _HOST_OVERRIDE[2],
+                data=data, headers=headers)
+        return _orig_post(self, data=data, headers=headers)
+
+    Login._post = _patched_post
+
+
+_patch_library_host()
+
+
 class Broker:
     def __init__(self):
         self.api = None
@@ -178,10 +218,37 @@ class Broker:
             gc.collect()
             time.sleep(1)  # let the server close the old websocket session
 
-        self.api = IQ_Option(config.IQ_EMAIL, config.IQ_PASSWORD)
-        check, reason = self.api.connect()
-        if not check:
-            raise ConnectionError(f"IQ Option login failed: {reason}")
+        global _HOST_OVERRIDE
+
+        def _split(entry):
+            parts = entry.split("|")
+            api_host = parts[0]
+            ws_host = parts[1] if len(parts) > 1 and parts[1] else api_host
+            auth_host = parts[2] if len(parts) > 2 and parts[2] else "auth.iqoption.com"
+            return (api_host, ws_host, auth_host)
+
+        hosts = [_split(h) for h in (config.IQ_HOSTS or ["iqoption.com"])]
+        # Prefer the host pair that worked last time
+        if _HOST_OVERRIDE in hosts:
+            hosts = [_HOST_OVERRIDE] + [h for h in hosts if h != _HOST_OVERRIDE]
+
+        last_reason = None
+        for host in hosts:
+            _HOST_OVERRIDE = host
+            self.api = IQ_Option(config.IQ_EMAIL, config.IQ_PASSWORD)
+            try:
+                check, reason = self.api.connect()
+            except Exception as e:
+                check, reason = False, str(e)
+            if check:
+                break
+            last_reason = reason
+            log.warning("Login via %s failed: %s", host[0], reason)
+        else:
+            _HOST_OVERRIDE = None
+            raise ConnectionError(f"IQ Option login failed: {last_reason}")
+
+        log.info("Logged in via %s (ws %s)", _HOST_OVERRIDE[0], _HOST_OVERRIDE[1])
         self.api.change_balance(config.ACCOUNT_TYPE)
         self._calls_since_reconnect = 0
         self._patch_get_candles()

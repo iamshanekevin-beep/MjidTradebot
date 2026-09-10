@@ -33,6 +33,15 @@ IQ_EMAIL = os.getenv("IQ_EMAIL", "")
 IQ_PASSWORD = os.getenv("IQ_PASSWORD", "")
 ACCOUNT_TYPE = os.getenv("ACCOUNT_TYPE", "PRACTICE")  # PRACTICE or REAL — start on PRACTICE
 
+# Hosts to try, in order. Some proxies/networks can reach only some of IQ
+# Option's domains (they all serve the same API), so we fall back in order.
+# Each entry is "api_host", "api_host|websocket_host", or
+# "api_host|websocket_host|auth_host".
+IQ_HOSTS = [h.strip() for h in os.getenv(
+    "IQ_HOSTS",
+    "iqoption.com,iqbroker.com|ws.iqoption.com|auth.iqbroker.com"
+).split(",") if h.strip()]
+
 # --- Market / instrument ---
 PAIR = os.getenv("PAIR", "EURUSD-OTC")
 PAIRS = [p.strip() for p in os.getenv(

@@ -1,5 +1,7 @@
+import json
 import logging
 import math
+import re
 import time
 from datetime import datetime, timezone
 
@@ -34,6 +36,15 @@ def _is_unreachable(exc):
     """True when the exception looks like IQ Option being unreachable."""
     text = str(exc)
     return any(hint in text for hint in _UNREACHABLE_HINTS)
+
+
+def _rate_limit_ttl(exc):
+    """Extract the TTL (seconds) from a requests_limit_exceeded error, or 0."""
+    text = str(exc)
+    if "requests_limit_exceeded" not in text:
+        return 0
+    m = re.search(r'"ttl"\s*:\s*(\d+)', text)
+    return int(m.group(1)) if m else 0
 
 
 class RiskState:
@@ -174,7 +185,15 @@ def run_bot():
             break
         except Exception as e:
             attempt += 1
-            if _is_unreachable(e):
+            ttl = _rate_limit_ttl(e)
+            if ttl:
+                # IQ Option rate-limited us — wait out the TTL (+buffer) instead
+                # of hammering and extending the ban.
+                connect_delay = min(ttl + 30, MAX_CONNECT_DELAY)
+                log.warning("Rate-limited by IQ Option — waiting %ds before retry.", connect_delay)
+                state.update(connected=False,
+                             last_signal_text="Rate-limited by IQ Option — retrying in %d min…" % (connect_delay // 60))
+            elif _is_unreachable(e):
                 # Environment condition, not an app fault: IQ Option is not
                 # reachable from this host. Say so once, plainly, then stay quiet.
                 if attempt == 1:
@@ -185,6 +204,8 @@ def run_bot():
                     )
                 else:
                     log.info("Still unreachable — retrying in %ds (attempt %d)", connect_delay, attempt)
+                state.update(connected=False,
+                             last_signal_text="IQ Option unreachable from this host — retrying…")
             else:
                 # A real failure (e.g. rejected credentials) deserves attention.
                 msg = "Connection failed (%s). Retrying in %ds..." % (e, connect_delay)
@@ -192,10 +213,6 @@ def run_bot():
                     log.error(msg)
                 else:
                     log.warning("%s (attempt %d)", msg, attempt)
-            if _is_unreachable(e):
-                state.update(connected=False,
-                             last_signal_text="IQ Option unreachable from this host — retrying…")
-            else:
                 state.update(connected=False, last_signal_text="Connection failed: %s" % e)
             time.sleep(connect_delay)
             connect_delay = min(connect_delay * 2, MAX_CONNECT_DELAY)

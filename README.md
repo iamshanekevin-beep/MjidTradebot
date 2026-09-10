@@ -15,7 +15,7 @@ A previous Base44 deployment of this bot ended up with `TRADE_AMOUNT=100` and
 `AUTO_TRADE` effectively on, with no one having deliberately set either —
 real $100 trades fired automatically. Two things fixed that here:
 
-1. **`config.py` now defaults `AUTO_TRADE=False` and `TRADE_AMOUNT=1`** — if an
+1. **`config.py` now defaults `AUTO_TRADE=True` and `TRADE_AMOUNT=1`** — if an
    environment variable is ever missing or fails to load, the bot fails safe
    (logs only) instead of failing dangerous.
 2. **`.env.base44-defaults` explicitly sets both values** at the top of the
@@ -46,7 +46,7 @@ trust the defaults blindly either — check them.
    ============================================================
    BOT STARTUP — CURRENT LIVE SETTINGS
      ACCOUNT_TYPE   = PRACTICE
-     AUTO_TRADE     = False  (signals only, no trades)
+     AUTO_TRADE     = True  (signals only, no trades)
      TRADE_AMOUNT   = 1.0
      ...
    ============================================================

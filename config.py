@@ -39,7 +39,7 @@ ACCOUNT_TYPE = os.getenv("ACCOUNT_TYPE", "PRACTICE")  # PRACTICE or REAL — sta
 # "api_host|websocket_host|auth_host".
 IQ_HOSTS = [h.strip() for h in os.getenv(
     "IQ_HOSTS",
-    "iqoption.com,iqbroker.com|ws.iqoption.com|auth.iqbroker.com"
+    "iqbroker.com|ws.iqbroker.com|auth.iqbroker.com,iqoption.com"
 ).split(",") if h.strip()]
 
 # --- Market / instrument ---

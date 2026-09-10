@@ -47,6 +47,11 @@ def _rate_limit_ttl(exc):
     return int(m.group(1)) if m else 0
 
 
+def _is_bad_credentials(exc):
+    """True when IQ Option rejected the login as invalid_credentials."""
+    return "invalid_credentials" in str(exc)
+
+
 class RiskState:
     def __init__(self):
         self.trades_today = 0
@@ -193,6 +198,15 @@ def run_bot():
                 log.warning("Rate-limited by IQ Option — waiting %ds before retry.", connect_delay)
                 state.update(connected=False,
                              last_signal_text="Rate-limited by IQ Option — retrying in %d min…" % (connect_delay // 60))
+            elif _is_bad_credentials(e):
+                # Wrong credentials — retrying won't help, and will trigger rate
+                # limits. Wait a long time before trying again (in case the user
+                # updates the password via the Secrets page).
+                connect_delay = MAX_CONNECT_DELAY
+                log.error("IQ Option rejected credentials (invalid email/password). "
+                          "Update IQ_EMAIL/IQ_PASSWORD on the Secrets page, then restart.")
+                state.update(connected=False,
+                             last_signal_text="❌ Invalid credentials — update email/password on the Secrets page")
             elif _is_unreachable(e):
                 # Environment condition, not an app fault: IQ Option is not
                 # reachable from this host. Say so once, plainly, then stay quiet.

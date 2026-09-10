@@ -18,7 +18,6 @@ class RiskState:
         self.consecutive_losses = 0
         self.pnl_today = 0.0
         self.day = datetime.now(timezone.utc).date()
-        self.paused = False
 
     def reset_if_new_day(self):
         today = datetime.now(timezone.utc).date()
@@ -28,19 +27,13 @@ class RiskState:
             self.trades_today = 0
             self.consecutive_losses = 0
             self.pnl_today = 0.0
-            self.paused = False
 
-    def can_trade(self):
+    def can_trade(self, daily_loss_limit=None):
         self.reset_if_new_day()
-        if self.paused:
-            return False, "paused after hitting a risk limit"
         if self.trades_today >= config.MAX_TRADES_PER_DAY:
             return False, "hit MAX_TRADES_PER_DAY"
-        if self.consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
-            self.paused = True
-            return False, "hit MAX_CONSECUTIVE_LOSSES"
-        if self.pnl_today <= -abs(config.DAILY_LOSS_LIMIT):
-            self.paused = True
+        limit = daily_loss_limit if daily_loss_limit is not None else config.DAILY_LOSS_LIMIT
+        if self.pnl_today <= -abs(limit):
             return False, "hit DAILY_LOSS_LIMIT"
         return True, None
 
@@ -50,7 +43,7 @@ class RiskState:
     def record_result(self, result, amount):
         if result == "win":
             self.consecutive_losses = 0
-            self.pnl_today += amount * 0.8  # approximate payout — adjust to your real payout %
+            self.pnl_today += amount * 0.8  # approximate payout
         elif result == "loss":
             self.consecutive_losses += 1
             self.pnl_today -= amount
@@ -61,7 +54,6 @@ class RiskState:
 # ---------------------------------------------------------------------------
 
 def _to_native(v):
-    """Convert numpy/pandas scalars to JSON-safe Python natives."""
     if v is None:
         return None
     if hasattr(v, "item"):
@@ -74,7 +66,6 @@ def _to_native(v):
 
 
 def _extract(info, key):
-    """Recursively look for *key* in a (possibly nested) signal info dict."""
     if not isinstance(info, dict):
         return None
     if key in info:
@@ -87,168 +78,234 @@ def _extract(info, key):
     return None
 
 
-def _signal_entry(direction, info):
+def _signal_entry(direction, info, pair):
     return {
         "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+        "pair": pair,
         "direction": direction,
         "price": _extract(info, "price"),
-        "score": _extract(info, "score"),
-        "reason": _extract(info, "reason"),
         "upper_band": _extract(info, "upper_band"),
         "lower_band": _extract(info, "lower_band"),
-        "summary": _summarize(info),
+        "candle_dir": _extract(info, "candle_dir"),
+        "reason": _extract(info, "reason"),
+        "summary": "%s | %s" % (pair, _summarize(info)),
     }
+
+
+def _summarize(info):
+    if not isinstance(info, dict):
+        return str(info)
+    keys_of_interest = ("price", "reason", "upper_band", "lower_band", "candle_dir")
+    parts = []
+    for k in keys_of_interest:
+        if k in info:
+            v = info[k]
+            parts.append(f"{k}={v:.5f}" if isinstance(v, float) else f"{k}={v}")
+    return " ".join(parts) if parts else str(info)
 
 
 # ---------------------------------------------------------------------------
 # Main bot loop (callable from dashboard.py in a background thread)
+#
+# Scans ONE pair per cycle, rotating through all pairs every 0.5s.
+# This keeps the API request rate at ~2 req/s (well within IQ Option's limits)
+# while still covering all 10 pairs every 5 seconds.
 # ---------------------------------------------------------------------------
 
 def run_bot():
     log.info("\n" + config.startup_banner())
 
-    # Sync state from config at startup
     state.update(
         auto_trade=config.AUTO_TRADE,
         account_type=config.ACCOUNT_TYPE,
         trade_amount=config.TRADE_AMOUNT,
+        daily_loss_limit=config.DAILY_LOSS_LIMIT,
+        pairs=list(config.PAIRS),
+        scan_interval=config.SCAN_INTERVAL_SECONDS,
+        cooldown_minutes=config.COOLDOWN_MINUTES,
     )
 
     if not config.IQ_EMAIL or not config.IQ_PASSWORD:
-        log.error("IQ_EMAIL / IQ_PASSWORD are not set. Set them in your platform's Secrets/Variables.")
+        log.error("IQ_EMAIL / IQ_PASSWORD are not set.")
         state.update(connected=False, last_signal_text="Missing IQ Option credentials.")
         return
 
     broker = Broker()
     risk = RiskState()
 
+    # --- Connect ---
     while True:
         try:
             broker.connect()
-            state.update(connected=True, last_signal_text="Connected to IQ Option (%s account)" % config.ACCOUNT_TYPE)
+            balance = broker.get_balance()
+            state.update(
+                connected=True,
+                balance=balance,
+                last_signal_text="Connected — scanning %d pairs every %ss" % (len(config.PAIRS), config.SCAN_INTERVAL_SECONDS),
+            )
+            log.info("Account balance: %s", balance)
             break
         except Exception as e:
             log.error("Connection failed (%s). Retrying in 15s...", e)
             state.update(connected=False, last_signal_text="Connection failed: %s" % e)
             time.sleep(15)
 
-    last_candle_ts = None
+    # --- State ---
+    last_candle_ts = {}        # {pair: last processed candle timestamp}
+    pending_trade = None        # {order_id, pair, direction, amount, trade_entry, complete_at}
+    cooldown_until = None       # epoch timestamp or None
+    last_balance_check = 0.0
+    pair_index = 0
+    scan_interval = config.SCAN_INTERVAL_SECONDS
 
+    # --- Main loop ---
     while True:
         try:
-            # Allow pause/resume from the dashboard
+            now = time.time()
+
+            # Dashboard pause
             if state.paused:
-                time.sleep(config.POLL_SECONDS)
+                time.sleep(scan_interval)
                 continue
 
-            df = broker.get_candles_df()
-            if df.empty:
-                time.sleep(config.POLL_SECONDS)
-                continue
+            # --- Cooldown management ---
+            if cooldown_until:
+                if now >= cooldown_until:
+                    cooldown_until = None
+                    risk.consecutive_losses = 0
+                    state.update(cooldown_until=None, cooldown_remaining=0, consecutive_losses=0,
+                                 last_signal_text="Cooldown ended — resuming trading")
+                    log.info("Cooldown ended — resuming trading")
+                else:
+                    remaining = int(cooldown_until - now)
+                    state.update(cooldown_remaining=remaining)
 
-            latest_ts = df["timestamp"].iloc[-1]
-            if latest_ts == last_candle_ts:
-                time.sleep(config.POLL_SECONDS)
-                continue
-            last_candle_ts = latest_ts
+            # --- Check pending trade result ---
+            if pending_trade and now >= pending_trade["complete_at"]:
+                result = broker.get_trade_result(pending_trade["order_id"])
+                risk.record_result(result, pending_trade["amount"])
 
-            direction, info = strategy.get_signal(df)
+                pending_trade["trade_entry"]["result"] = result
+                pending_trade["trade_entry"]["pnl"] = round(risk.pnl_today, 2)
 
-            # Push signal to dashboard
-            entry = _signal_entry(direction, info)
-            state.add_signal(entry)
-            state.update(last_signal_text=entry["summary"])
+                completed = [t for t in state.trades if t.get("result") in ("win", "loss")]
+                wins = [t for t in completed if t["result"] == "win"]
+                state.update(
+                    daily_pnl=risk.pnl_today,
+                    trades_today=risk.trades_today,
+                    consecutive_losses=risk.consecutive_losses,
+                    win_rate=(len(wins) / len(completed) * 100) if completed else 0.0,
+                )
+                state.pnl_history.append(risk.pnl_today)
 
-            if direction is None:
-                log.info("No signal. %s", _summarize(info))
-                time.sleep(config.POLL_SECONDS)
-                continue
+                log.info("Trade result: %s on %s | daily P&L: %.2f", result, pending_trade["pair"], risk.pnl_today)
 
-            log.info("Signal: %s | %s", direction, _summarize(info))
+                # Trigger cooldown after 3 consecutive losses
+                if risk.consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
+                    cooldown_until = now + config.COOLDOWN_MINUTES * 60
+                    state.update(cooldown_until=cooldown_until,
+                                 last_signal_text="3 consecutive losses — %d-min cooldown" % config.COOLDOWN_MINUTES)
+                    log.info("3 consecutive losses — %d-minute cooldown started", config.COOLDOWN_MINUTES)
 
-            # Read auto_trade from state (allows runtime toggle via dashboard)
-            if not state.auto_trade:
-                log.info("AUTO_TRADE is off — signal logged only, no order placed.")
-                time.sleep(config.POLL_SECONDS)
-                continue
+                pending_trade = None
 
-            can_trade, reason = risk.can_trade()
-            if not can_trade:
-                log.warning("Trade skipped — risk control: %s", reason)
-                state.update(last_signal_text="Trade skipped — risk control: %s" % reason)
-                time.sleep(config.POLL_SECONDS)
-                continue
+            # --- Refresh balance periodically ---
+            if now - last_balance_check > 30:
+                try:
+                    bal = broker.get_balance()
+                    state.update(balance=bal)
+                    last_balance_check = now
+                except Exception:
+                    pass
 
-            # Read amount from state (allows runtime change via dashboard)
-            amount = state.trade_amount
-            success, order_id = broker.place_trade(direction, amount=amount)
-            risk.record_trade(amount)
+            # --- Scan ONE pair this cycle (rotate through all pairs) ---
+            pair = config.PAIRS[pair_index % len(config.PAIRS)]
+            pair_index += 1
 
-            trade_entry = {
-                "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
-                "direction": direction,
-                "amount": amount,
-                "pair": config.PAIR,
-                "expiration": config.EXPIRATION_MINUTES,
-                "order_id": order_id if success else None,
-                "result": "pending" if success else "failed",
-                "pnl": None,
-            }
-            state.add_trade(trade_entry)
+            in_cooldown = cooldown_until is not None and now < cooldown_until
+            can_trade = (state.auto_trade and not pending_trade and not in_cooldown)
 
-            if not success:
-                log.error("Trade failed: %s", order_id)
-                time.sleep(config.POLL_SECONDS)
-                continue
+            if can_trade:
+                ok, reason = risk.can_trade(state.daily_loss_limit)
+                if not ok:
+                    can_trade = False
 
-            log.info("Trade placed: %s amount=%s order_id=%s", direction, amount, order_id)
+            try:
+                df = broker.get_candles_df(pair=pair)
+                if not df.empty:
+                    latest_ts = df["timestamp"].iloc[-1]
+                    if latest_ts != last_candle_ts.get(pair):
+                        last_candle_ts[pair] = latest_ts
 
-            time.sleep(config.EXPIRATION_MINUTES * 60 + 5)
-            result = broker.get_trade_result(order_id)
-            risk.record_result(result, amount)
+                        direction, info = strategy.get_signal(df)
+                        entry = _signal_entry(direction, info, pair)
+                        state.add_signal(entry)
+                        state.update(last_signal_text=entry["summary"], active_pair=pair)
 
-            # Update the trade entry in-place (deque holds a reference to same dict)
-            trade_entry["result"] = result
-            trade_entry["pnl"] = round(risk.pnl_today, 2)
+                        if direction is None:
+                            log.info("No clean signal on %s. %s", pair, _summarize(info))
+                        else:
+                            log.info("★ Clean signal on %s: %s | %s", pair, direction, _summarize(info))
 
-            # Sync performance metrics to state
-            completed = [t for t in state.trades if t.get("result") in ("win", "loss")]
-            wins = [t for t in completed if t["result"] == "win"]
-            state.update(
-                daily_pnl=risk.pnl_today,
-                trades_today=risk.trades_today,
-                consecutive_losses=risk.consecutive_losses,
-                win_rate=(len(wins) / len(completed) * 100) if completed else 0.0,
-            )
-            state.pnl_history.append(risk.pnl_today)
+                            if can_trade:
+                                # Place trade — base stake only, no martingale
+                                amount = state.trade_amount
+                                success, order_id = broker.place_trade(direction, amount=amount, pair=pair)
+                                risk.record_trade(amount)
 
-            log.info("Trade result: %s | daily P&L (approx): %.2f", result, risk.pnl_today)
+                                trade_entry = {
+                                    "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+                                    "direction": direction,
+                                    "amount": amount,
+                                    "pair": pair,
+                                    "expiration": config.EXPIRATION_MINUTES,
+                                    "order_id": order_id if success else None,
+                                    "result": "pending" if success else "failed",
+                                    "pnl": None,
+                                }
+                                state.add_trade(trade_entry)
+
+                                if success:
+                                    log.info("✓ Trade placed: %s %s amount=%s order_id=%s", direction, pair, amount, order_id)
+                                    pending_trade = {
+                                        "order_id": order_id,
+                                        "pair": pair,
+                                        "direction": direction,
+                                        "amount": amount,
+                                        "trade_entry": trade_entry,
+                                        "complete_at": time.time() + config.EXPIRATION_MINUTES * 60 + 5,
+                                    }
+                                else:
+                                    log.error("Trade failed on %s: %s", pair, order_id)
+                            else:
+                                reason = ("auto_trade off" if not state.auto_trade
+                                          else "pending trade" if pending_trade
+                                          else "cooldown" if in_cooldown
+                                          else "risk control")
+                                log.info("  → not trading (%s), signal logged only", reason)
+
+            except Exception as e:
+                log.warning("Error scanning %s: %s — reconnecting", pair, e)
+                try:
+                    broker.connect()
+                    state.update(connected=True)
+                except Exception:
+                    state.update(connected=False)
+                    log.error("Reconnect failed after %s error", pair)
+
+            time.sleep(scan_interval)
 
         except Exception as e:
             log.error("Error in main loop: %s. Reconnecting in 15s...", e)
             state.update(connected=False, last_signal_text="Error: %s. Reconnecting…" % e)
+            pending_trade = None
             time.sleep(15)
             try:
                 broker.connect()
-                state.update(connected=True)
+                bal = broker.get_balance()
+                state.update(connected=True, balance=bal)
             except Exception as e2:
                 log.error("Reconnect failed: %s", e2)
-
-
-def _summarize(info):
-    if not isinstance(info, dict):
-        return str(info)
-    keys_of_interest = ("price", "score", "reason", "upper_band", "lower_band")
-    parts = []
-    for k in keys_of_interest:
-        if k in info:
-            v = info[k]
-            parts.append(f"{k}={v:.5f}" if isinstance(v, float) else f"{k}={v}")
-    if "fcb" in info:
-        parts.append(f"fcb={_summarize(info['fcb'])}")
-    if "pole_position" in info:
-        parts.append(f"pole_position={_summarize(info['pole_position'])}")
-    return " ".join(parts) if parts else str(info)
 
 
 if __name__ == "__main__":

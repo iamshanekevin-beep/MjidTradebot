@@ -21,15 +21,23 @@ class BotState:
         self.auto_trade = config.AUTO_TRADE
         self.account_type = config.ACCOUNT_TYPE
         self.trade_amount = config.TRADE_AMOUNT
+        self.daily_loss_limit = config.DAILY_LOSS_LIMIT
+
+        # Scanning
+        self.pairs = list(config.PAIRS)
+        self.active_pair = None
+        self.scan_interval = config.SCAN_INTERVAL_SECONDS
+
+        # Cooldown
+        self.cooldown_until = None       # epoch timestamp or None
+        self.cooldown_remaining = 0      # seconds remaining (for display)
+        self.cooldown_minutes = config.COOLDOWN_MINUTES
 
         # Static settings (display only)
-        self.pair = config.PAIR
         self.strategy = config.STRATEGY
         self.max_trades_per_day = config.MAX_TRADES_PER_DAY
         self.max_consecutive_losses = config.MAX_CONSECUTIVE_LOSSES
-        self.daily_loss_limit = config.DAILY_LOSS_LIMIT
         self.timeframe_seconds = config.TIMEFRAME_SECONDS
-        self.poll_seconds = config.POLL_SECONDS
         self.expiration_minutes = config.EXPIRATION_MINUTES
 
         # Activity feeds
@@ -74,13 +82,17 @@ class BotState:
                 "auto_trade": self.auto_trade,
                 "account_type": self.account_type,
                 "trade_amount": self.trade_amount,
-                "pair": self.pair,
+                "daily_loss_limit": self.daily_loss_limit,
+                "pairs": list(self.pairs),
+                "active_pair": self.active_pair,
+                "scan_interval": self.scan_interval,
+                "cooldown_until": self.cooldown_until,
+                "cooldown_remaining": self.cooldown_remaining,
+                "cooldown_minutes": self.cooldown_minutes,
                 "strategy": self.strategy,
                 "max_trades_per_day": self.max_trades_per_day,
                 "max_consecutive_losses": self.max_consecutive_losses,
-                "daily_loss_limit": self.daily_loss_limit,
                 "timeframe_seconds": self.timeframe_seconds,
-                "poll_seconds": self.poll_seconds,
                 "expiration_minutes": self.expiration_minutes,
                 "latest_signal": self.latest_signal,
                 "signals": list(self.signals),

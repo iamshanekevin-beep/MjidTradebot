@@ -48,6 +48,13 @@ def set_control():
         except (TypeError, ValueError):
             pass
 
+    if "daily_loss_limit" in data:
+        try:
+            state.daily_loss_limit = float(data["daily_loss_limit"])
+            log.info("DAILY_LOSS_LIMIT set to %s via dashboard", state.daily_loss_limit)
+        except (TypeError, ValueError):
+            pass
+
     if "account_type" in data:
         val = str(data["account_type"]).upper()
         if val in ("PRACTICE", "REAL"):

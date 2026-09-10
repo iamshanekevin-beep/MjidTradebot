@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trading Bot Dashboard</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#fff;color:#172033;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}button,input{font:inherit}.shell{max-width:911px;margin:0 auto;min-height:100vh;background:#f8fafc;overflow:hidden;position:relative}.top{height:76px;padding:0 38px;display:flex;align-items:center;justify-content:space-between;background:#fff;border-bottom:1px solid #e8edf5;animation:rise .6s ease both;position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:12px;font-weight:800;font-size:18px;letter-spacing:-.03em}.mark{width:34px;height:34px;border-radius:11px;background:#4f46e5;display:grid;place-items:center;color:#fff;box-shadow:0 7px 16px #4f46e533;flex-shrink:0}.mark svg{width:20px}.topnav{display:flex;gap:9px}.topnav button,.action{border:1px solid #e2e7f0;background:#fff;color:#59657a;border-radius:10px;padding:9px 14px;cursor:pointer;transition:.2s ease;box-shadow:0 3px 8px #2538580a}.topnav button:hover,.action:hover{color:#4f46e5;border-color:#c9c8fb;box-shadow:0 6px 16px #4f46e51c}.topnav button:active,.action:active{box-shadow:0 2px 5px #2538581f}.topnav button:focus-visible,.action:focus-visible{outline:3px solid #c7d2fe;outline-offset:2px}.hero{margin:28px 38px 0;min-height:250px;border-radius:24px;overflow:hidden;position:relative;background:#e7eaff;border:1px solid #dfe4f4;box-shadow:0 18px 40px #34405412;animation:rise .7s .08s ease both}.hero img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.78}.hero:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,#f1f3ffed 0%,#f1f3ffb8 47%,#f1f3ff20 100%)}.heroContent{position:relative;z-index:1;width:53%;padding:31px 30px}.eyebrow{font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:#4f46e5;margin-bottom:13px}.hero h1{font-size:33px;line-height:1.08;letter-spacing:-.05em;margin:0 0 12px}.hero p{font-size:14px;line-height:1.65;color:#64748b;margin:0}.heroStat{margin-top:23px;display:flex;align-items:end;gap:15px}.heroStat strong{font-size:29px;letter-spacing:-.04em}.up{color:#16a36a}.down{color:#e05252}.heroStat span{font-size:12px;color:#16a36a;font-weight:700;padding-bottom:5px}.content{padding:25px 38px 54px}.sectionHead{display:flex;align-items:end;justify-content:space-between;margin-bottom:14px}.sectionHead h2{font-size:18px;letter-spacing:-.025em;margin:0}.sectionHead span{color:#8994a8;font-size:12px}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin-bottom:28px}.card,.panel,.control{background:#fff;border:1px solid #e6ebf3;border-radius:18px;padding:20px;box-shadow:0 9px 26px #2538580c;animation:rise .7s .25s ease both}.card{border-radius:16px;padding:17px;cursor:default}.card.toggle{cursor:pointer;transition:border-color .2s,box-shadow .2s}.card.toggle:hover{border-color:#c9c8fb;box-shadow:0 9px 26px #4f46e51c}.cardTop{display:flex;justify-content:space-between;align-items:center;color:#8490a5;font-size:11px}.dot{width:8px;height:8px;border-radius:50%;background:#16a36a;box-shadow:0 0 0 4px #dcfce7;animation:pulse 2.5s ease-in-out infinite}.dot.off{background:#cbd5e1;box-shadow:0 0 0 4px #f1f5f9;animation:none}.value{font-size:22px;font-weight:800;letter-spacing:-.04em;margin:14px 0 5px}.delta{font-size:11px;font-weight:700;color:#16a36a}.delta.muted{color:#8994a8}.delta.danger{color:#e05252}.workspace{display:grid;grid-template-columns:1.48fr .92fr;gap:17px;align-items:start}.panelHead,.controlHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:19px}.panel h3,.control h3{font-size:15px;margin:0}.range{display:flex;gap:4px}.range button{border:0;background:#f3f5fa;border-radius:7px;color:#8a95a8;font-size:10px;padding:6px 8px;cursor:pointer;transition:.2s}.range button:hover,.range button:focus-visible{background:#e8e9ff;color:#4f46e5}.range button.active{background:#4f46e5;color:#fff}.chart{height:205px;position:relative;border-left:1px solid #e7ebf3;border-bottom:1px solid #e7ebf3;background:repeating-linear-gradient(0deg,transparent 0 40px,#eef1f6 41px),repeating-linear-gradient(90deg,transparent 0 74px,#f1f3f7 75px);display:flex;align-items:center;justify-content:center}.chart svg{position:absolute;inset:12px 9px 8px 7px;width:calc(100% - 16px);height:calc(100% - 20px)}.chart .placeholder{color:#b4bcc9;font-size:12px;position:relative;z-index:1}.legend{display:flex;gap:18px;margin-top:14px;color:#8a95a8;font-size:11px}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;background:#4f46e5}.legend i.green{background:#16a36a}.tradeList{display:flex;flex-direction:column;gap:0;max-height:260px;overflow-y:auto}.trade{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid #edf0f5}.trade:last-child{border:0}.trade.empty{justify-content:center;color:#b4bcc9;font-size:12px;border:0;padding:24px 0}.pair{display:flex;align-items:center;gap:10px}.coin{width:31px;height:31px;border-radius:10px;background:#eef2ff;color:#4f46e5;display:grid;place-items:center;font-weight:800;font-size:11px;flex-shrink:0}.trade b{font-size:12px;display:block}.trade small{display:block;color:#98a2b3;font-size:10px;margin-top:3px}.tradeRight{text-align:right}.tradeRight strong{font-size:12px}.tradeRight small{color:#16a36a}.tradeRight small.down{color:#e05252}.tradeRight small.pending{color:#8994a8}.control{margin-top:17px}.controlHead{margin-bottom:16px}.status{font-size:10px;font-weight:800;background:#ecfdf5;padding:6px 9px;border-radius:20px;color:#16a36a}.status.off{background:#fef2f2;color:#e05252}.status.paused{background:#fffbeb;color:#d97706}.settings{display:grid;grid-template-columns:repeat(4,1fr);gap:11px}.setting{background:#f8fafc;border:1px solid #edf0f5;border-radius:11px;padding:12px}.setting span{display:block;color:#8a95a8;font-size:10px;margin-bottom:7px}.setting b{font-size:13px}.controlRow{display:flex;align-items:end;gap:12px;margin-top:16px;flex-wrap:wrap}.field{flex:1;min-width:120px}.field label{display:block;color:#8a95a8;font-size:10px;margin-bottom:7px}.field input{width:100%;border:1px solid #e1e6ef;border-radius:10px;padding:10px 12px;color:#172033;background:#fff;outline:0;transition:.2s}.field input:hover,.field input:focus{border-color:#a5b4fc;box-shadow:0 0 0 3px #e0e7ff}.action{padding:10px 17px;background:#4f46e5;color:#fff;border-color:#4f46e5;font-weight:700}.action:hover{background:#4338ca;color:#fff}.action.live-btn{background:#fff;color:#e05252;border-color:#f0caca}.action.live-btn:hover{background:#fff4f4;color:#c53d3d;border-color:#e9aaaa}.action.pause{background:#fff;color:#e05252;border-color:#f0caca}.action.pause:hover{background:#fff4f4;color:#c53d3d;border-color:#e9aaaa}.footerline{margin-top:22px;color:#9aa4b5;font-size:11px;display:flex;justify-content:space-between;border-top:1px solid #e8edf4;padding-top:17px;flex-wrap:wrap;gap:8px}@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}@keyframes pulse{0%,100%{opacity:.72}50%{opacity:1}}@media(max-width:760px){.cards{grid-template-columns:repeat(2,1fr)}.workspace{grid-template-columns:1fr}.settings{grid-template-columns:repeat(2,1fr)}.heroContent{width:100%}.content{padding:25px 20px 40px}.hero{margin:20px 20px 0}.top{padding:0 20px}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="top">
+    <div class="brand">
+      <span class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 16 9 11l3 3 7-8"/><path d="M15 6h4v4"/></svg></span>
+      Trading bot
+    </div>
+    <nav class="topnav">
+      <button>Dashboard</button>
+      <button>Settings</button>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <img src="https://media.base44.com/images/public/6aa2b759af4881f6d42890ec/b5a776989_generated_6341a5ec.jpg" alt="">
+    <div class="heroContent">
+      <div class="eyebrow">BOT STARTUP — CURRENT LIVE SETTINGS</div>
+      <h1>Automated decisions, clearly in view.</h1>
+      <p>Signals, safeguards, and execution activity brought together in one calm workspace.</p>
+      <div class="heroStat">
+        <strong id="heroPnl">$0.00</strong>
+        <span id="heroPnlDelta">signals only</span>
+      </div>
+    </div>
+  </section>
+
+  <main class="content">
+    <div class="sectionHead">
+      <h2>Overview</h2>
+      <span id="updateTime">Updated just now</span>
+    </div>
+    <div class="cards">
+      <article class="card">
+        <div class="cardTop">Account <i class="dot" id="connDot"></i></div>
+        <div class="value" id="cardAccount">PRACTICE</div>
+        <div class="delta muted" id="cardAccountDelta">Connecting…</div>
+      </article>
+      <article class="card toggle" id="autoTradeCard">
+        <div class="cardTop">AUTO_TRADE <i class="dot off" id="autoDot"></i></div>
+        <div class="value" id="cardAutoTrade">False</div>
+        <div class="delta muted" id="cardAutoDelta">signals only, no trades</div>
+      </article>
+      <article class="card">
+        <div class="cardTop">TRADE_AMOUNT</div>
+        <div class="value" id="cardAmount">$1.00</div>
+        <div class="delta muted" id="cardAmountDelta">Safe default</div>
+      </article>
+      <article class="card">
+        <div class="cardTop">PAIR</div>
+        <div class="value" id="cardPair">EURUSD-OTC</div>
+        <div class="delta muted" id="cardPairDelta">60s timeframe</div>
+      </article>
+    </div>
+
+    <div class="workspace">
+      <section class="panel">
+        <div class="panelHead">
+          <h3>Performance</h3>
+          <div class="range">
+            <button class="active">1D</button>
+            <button>1W</button>
+            <button>1M</button>
+          </div>
+        </div>
+        <div class="chart" id="chartContainer">
+          <span class="placeholder">Waiting for trade data…</span>
+        </div>
+        <div class="legend">
+          <span><i></i>P&L</span>
+          <span><i class="green"></i>Win rate <b id="legendWinRate">0%</b></span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panelHead">
+          <h3>Recent activity</h3>
+          <span id="tradeCount">0 trades</span>
+        </div>
+        <div class="tradeList" id="tradeList">
+          <div class="trade empty">No trades yet</div>
+        </div>
+      </section>
+    </div>
+
+    <section class="control">
+      <div class="controlHead">
+        <h3>Bot controls</h3>
+        <span class="status" id="botStatus">Connected</span>
+      </div>
+      <div class="settings">
+        <div class="setting"><span>STRATEGY</span><b id="setStrategy">BOTH</b></div>
+        <div class="setting"><span>MAX_TRADES_PER_DAY</span><b id="setMaxTrades">20</b></div>
+        <div class="setting"><span>MAX_CONSECUTIVE_LOSSES</span><b id="setMaxLosses">3</b></div>
+        <div class="setting"><span>DAILY_LOSS_LIMIT</span><b id="setDailyLimit">$20.00</b></div>
+      </div>
+      <div class="controlRow">
+        <div class="field">
+          <label for="stake">Stake amount</label>
+          <input id="stake" type="number" min="1" max="100" step="1" value="1">
+        </div>
+        <button class="action" id="btnDemo">Demo</button>
+        <button class="action live-btn" id="btnLive">Live</button>
+        <button class="action" id="btnResume">Resume</button>
+        <button class="action pause" id="btnPause">Pause</button>
+      </div>
+    </section>
+
+    <div class="footerline">
+      <span id="footerSignal">Last signal: Waiting for first signal…</span>
+      <span id="footerPoll">Polling every 5s</span>
+    </div>
+  </main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // -- helpers --------------------------------------------------------
+
+  function fmtMoney(v) {
+    var sign = v > 0 ? "+" : v < 0 ? "\u2212" : "";
+    return sign + "$" + Math.abs(v).toFixed(2);
+  }
+
+  function buildLinePath(values) {
+    if (!values || values.length < 2) return null;
+    var w = 520, h = 180, pad = 14;
+    var min = Math.min.apply(null, values);
+    var max = Math.max.apply(null, values);
+    var range = (max - min) || 1;
+    var pts = values.map(function (v, i) {
+      return {
+        x: pad + (i / (values.length - 1)) * (w - 2 * pad),
+        y: h - pad - ((v - min) / range) * (h - 2 * pad)
+      };
+    });
+    var d = "M" + pts[0].x.toFixed(1) + "," + pts[0].y.toFixed(1);
+    for (var i = 1; i < pts.length; i++) {
+      var cx = ((pts[i - 1].x + pts[i].x) / 2).toFixed(1);
+      d += " C" + cx + "," + pts[i - 1].y.toFixed(1) +
+           " " + cx + "," + pts[i].y.toFixed(1) +
+           " " + pts[i].x.toFixed(1) + "," + pts[i].y.toFixed(1);
+    }
+    return { d: d, lastX: pts[pts.length - 1].x, firstX: pts[0].x };
+  }
+
+  function renderChart(values) {
+    var container = document.getElementById("chartContainer");
+    var info = buildLinePath(values);
+    if (!info) {
+      container.innerHTML = '<span class="placeholder">Waiting for trade data…</span>';
+      return;
+    }
+    var area = info.d + " V180 H" + info.firstX.toFixed(1) + " Z";
+    container.innerHTML =
+      '<svg viewBox="0 0 520 180" preserveAspectRatio="none">' +
+      '<path d="' + area + '" fill="#4f46e5" opacity=".08"/>' +
+      '<path d="' + info.d + '" fill="none" stroke="#4f46e5" stroke-width="3" stroke-linecap="round"/>' +
+      '</svg>';
+  }
+
+  function renderTrades(trades) {
+    var list = document.getElementById("tradeList");
+    var count = document.getElementById("tradeCount");
+    count.textContent = trades.length + (trades.length === 1 ? " trade" : " trades");
+
+    if (!trades.length) {
+      list.innerHTML = '<div class="trade empty">No trades yet</div>';
+      return;
+    }
+
+    list.innerHTML = trades.slice().reverse().map(function (t) {
+      var coin = (t.pair || "EU").substring(0, 2);
+      var resultColor = t.result === "win" ? "up" : t.result === "loss" ? "down" : "pending";
+      var pnlText = t.pnl != null ? fmtMoney(t.pnl) : "\u2014";
+      var resultText = t.result || "pending";
+      if (t.result === "failed") pnlText = "Failed";
+      return (
+        '<div class="trade">' +
+          '<div class="pair">' +
+            '<div class="coin">' + coin + '</div>' +
+            '<div><b>' + (t.pair || "—") + '</b><small>' + (t.direction || "—") + ' \u00b7 ' + (t.expiration || 1) + ' min</small></div>' +
+          '</div>' +
+          '<div class="tradeRight">' +
+            '<strong class="' + (t.result === "loss" ? "down" : "up") + '">' + pnlText + '</strong>' +
+            '<small class="' + resultColor + '">' + resultText + '</small>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join("");
+  }
+
+  // -- state → DOM ----------------------------------------------------
+
+  function update(s) {
+    // Connection dot
+    var dot = document.getElementById("connDot");
+    dot.className = "dot" + (s.connected ? "" : " off");
+
+    // Account card
+    document.getElementById("cardAccount").textContent = s.account_type;
+    document.getElementById("cardAccountDelta").textContent = s.connected ? "Connected" : "Disconnected";
+    document.getElementById("cardAccountDelta").className = "delta " + (s.connected ? "" : "danger");
+
+    // AUTO_TRADE card
+    document.getElementById("cardAutoTrade").textContent = s.auto_trade ? "True" : "False";
+    document.getElementById("cardAutoDelta").textContent = s.auto_trade ? "trades will be placed" : "signals only, no trades";
+    document.getElementById("cardAutoDelta").className = "delta " + (s.auto_trade ? "" : "muted");
+    document.getElementById("autoDot").className = "dot" + (s.auto_trade ? "" : " off");
+
+    // TRADE_AMOUNT card
+    document.getElementById("cardAmount").textContent = "$" + Number(s.trade_amount).toFixed(2);
+    document.getElementById("cardAmountDelta").textContent = "$" + Number(s.trade_amount).toFixed(2) + " per trade";
+
+    // PAIR card
+    document.getElementById("cardPair").textContent = s.pair;
+    document.getElementById("cardPairDelta").textContent = s.timeframe_seconds + "s timeframe";
+
+    // Hero P&L
+    var pnl = s.daily_pnl || 0;
+    var heroEl = document.getElementById("heroPnl");
+    heroEl.textContent = fmtMoney(pnl);
+    heroEl.className = pnl >= 0 ? "up" : "down";
+    var deltaEl = document.getElementById("heroPnlDelta");
+    if (s.win_rate > 0) {
+      deltaEl.textContent = s.win_rate.toFixed(1) + "% win rate";
+    } else {
+      deltaEl.textContent = s.auto_trade ? "live trading" : "signals only";
+    }
+
+    // Performance chart
+    renderChart(s.pnl_history);
+
+    // Win rate legend
+    document.getElementById("legendWinRate").textContent = (s.win_rate || 0).toFixed(0) + "%";
+
+    // Recent activity
+    renderTrades(s.trades);
+
+    // Bot status badge
+    var statusEl = document.getElementById("botStatus");
+    if (s.paused) {
+      statusEl.textContent = "Paused";
+      statusEl.className = "status paused";
+    } else if (s.connected) {
+      statusEl.textContent = "Connected";
+      statusEl.className = "status";
+    } else {
+      statusEl.textContent = "Disconnected";
+      statusEl.className = "status off";
+    }
+
+    // Settings
+    document.getElementById("setStrategy").textContent = s.strategy;
+    document.getElementById("setMaxTrades").textContent = s.max_trades_per_day;
+    document.getElementById("setMaxLosses").textContent = s.max_consecutive_losses;
+    document.getElementById("setDailyLimit").textContent = "$" + Number(s.daily_loss_limit).toFixed(2);
+
+    // Footer
+    document.getElementById("footerSignal").textContent = "Last signal: " + (s.last_signal_text || "—");
+    document.getElementById("footerPoll").textContent = "Polling every " + s.poll_seconds + "s";
+
+    // Update time
+    document.getElementById("updateTime").textContent = "Updated " + new Date().toLocaleTimeString();
+
+    // Sync stake input
+    var stakeInput = document.getElementById("stake");
+    if (document.activeElement !== stakeInput) {
+      stakeInput.value = s.trade_amount;
+    }
+  }
+
+  // -- polling --------------------------------------------------------
+
+  function poll() {
+    fetch("/api/state")
+      .then(function (r) { return r.json(); })
+      .then(update)
+      .catch(function (e) { console.error("poll error", e); });
+  }
+
+  setInterval(poll, 3000);
+  poll();
+
+  // -- controls -------------------------------------------------------
+
+  function postControl(payload) {
+    fetch("/api/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (r) { return r.json(); })
+      .then(update)
+      .catch(function (e) { console.error("control error", e); });
+  }
+
+  // AUTO_TRADE toggle (click the card)
+  document.getElementById("autoTradeCard").addEventListener("click", function () {
+    var current = document.getElementById("cardAutoTrade").textContent === "True";
+    postControl({ auto_trade: !current });
+  });
+
+  // Stake amount
+  document.getElementById("stake").addEventListener("change", function () {
+    postControl({ trade_amount: parseFloat(this.value) });
+  });
+
+  // Demo / Live / Resume / Pause
+  document.getElementById("btnDemo").addEventListener("click", function () {
+    postControl({ account_type: "PRACTICE" });
+  });
+  document.getElementById("btnLive").addEventListener("click", function () {
+    postControl({ account_type: "REAL" });
+  });
+  document.getElementById("btnResume").addEventListener("click", function () {
+    postControl({ paused: false });
+  });
+  document.getElementById("btnPause").addEventListener("click", function () {
+    postControl({ paused: true });
+  });
+
+  // Range buttons (visual only)
+  document.querySelectorAll(".range button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll(".range button").forEach(function (b) { b.classList.remove("active"); });
+      this.classList.add("active");
+    });
+  });
+})();
+</script>
+</body>
+</html>

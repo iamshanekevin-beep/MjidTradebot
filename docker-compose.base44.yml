@@ -4,9 +4,11 @@ services:
     working_dir: /app
     volumes:
       - ./:/app
+    ports:
+      - "3000:3000"
     env_file:
       - ./.env.base44-defaults
       - /run/base44/app.env
     command: >
-      bash -c "pip install --no-cache-dir -r requirements.txt && python main.py"
+      bash -c "pip install --no-cache-dir -r requirements.txt && python dashboard.py"
     restart: unless-stopped

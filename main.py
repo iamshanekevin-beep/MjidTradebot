@@ -1,10 +1,12 @@
 import logging
+import math
 import time
 from datetime import datetime, timezone
 
 import config
 import strategy
 from broker import Broker
+from bot_state import state
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bot")
@@ -54,13 +56,67 @@ class RiskState:
             self.pnl_today -= amount
 
 
-def main():
-    # Loud, unmissable startup banner — this is the fix for the $100/trade
-    # incident: you should never have to guess what the live settings are.
+# ---------------------------------------------------------------------------
+# Helpers for sharing signal/trade data with the dashboard
+# ---------------------------------------------------------------------------
+
+def _to_native(v):
+    """Convert numpy/pandas scalars to JSON-safe Python natives."""
+    if v is None:
+        return None
+    if hasattr(v, "item"):
+        v = v.item()
+    if isinstance(v, float):
+        return round(v, 5) if not (math.isnan(v) or math.isinf(v)) else None
+    if isinstance(v, (int, str, bool)):
+        return v
+    return str(v)
+
+
+def _extract(info, key):
+    """Recursively look for *key* in a (possibly nested) signal info dict."""
+    if not isinstance(info, dict):
+        return None
+    if key in info:
+        return _to_native(info[key])
+    for v in info.values():
+        if isinstance(v, dict):
+            found = _extract(v, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _signal_entry(direction, info):
+    return {
+        "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+        "direction": direction,
+        "price": _extract(info, "price"),
+        "score": _extract(info, "score"),
+        "reason": _extract(info, "reason"),
+        "upper_band": _extract(info, "upper_band"),
+        "lower_band": _extract(info, "lower_band"),
+        "summary": _summarize(info),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main bot loop (callable from dashboard.py in a background thread)
+# ---------------------------------------------------------------------------
+
+def run_bot():
     log.info("\n" + config.startup_banner())
+
+    # Sync state from config at startup
+    state.update(
+        auto_trade=config.AUTO_TRADE,
+        account_type=config.ACCOUNT_TYPE,
+        trade_amount=config.TRADE_AMOUNT,
+    )
 
     if not config.IQ_EMAIL or not config.IQ_PASSWORD:
         log.error("IQ_EMAIL / IQ_PASSWORD are not set. Set them in your platform's Secrets/Variables.")
+        state.update(connected=False, last_signal_text="Missing IQ Option credentials.")
         return
 
     broker = Broker()
@@ -69,15 +125,22 @@ def main():
     while True:
         try:
             broker.connect()
+            state.update(connected=True, last_signal_text="Connected to IQ Option (%s account)" % config.ACCOUNT_TYPE)
             break
         except Exception as e:
             log.error("Connection failed (%s). Retrying in 15s...", e)
+            state.update(connected=False, last_signal_text="Connection failed: %s" % e)
             time.sleep(15)
 
     last_candle_ts = None
 
     while True:
         try:
+            # Allow pause/resume from the dashboard
+            if state.paused:
+                time.sleep(config.POLL_SECONDS)
+                continue
+
             df = broker.get_candles_df()
             if df.empty:
                 time.sleep(config.POLL_SECONDS)
@@ -91,6 +154,11 @@ def main():
 
             direction, info = strategy.get_signal(df)
 
+            # Push signal to dashboard
+            entry = _signal_entry(direction, info)
+            state.add_signal(entry)
+            state.update(last_signal_text=entry["summary"])
+
             if direction is None:
                 log.info("No signal. %s", _summarize(info))
                 time.sleep(config.POLL_SECONDS)
@@ -98,7 +166,8 @@ def main():
 
             log.info("Signal: %s | %s", direction, _summarize(info))
 
-            if not config.AUTO_TRADE:
+            # Read auto_trade from state (allows runtime toggle via dashboard)
+            if not state.auto_trade:
                 log.info("AUTO_TRADE is off — signal logged only, no order placed.")
                 time.sleep(config.POLL_SECONDS)
                 continue
@@ -106,36 +175,69 @@ def main():
             can_trade, reason = risk.can_trade()
             if not can_trade:
                 log.warning("Trade skipped — risk control: %s", reason)
+                state.update(last_signal_text="Trade skipped — risk control: %s" % reason)
                 time.sleep(config.POLL_SECONDS)
                 continue
 
-            success, order_id = broker.place_trade(direction)
-            risk.record_trade(config.TRADE_AMOUNT)
+            # Read amount from state (allows runtime change via dashboard)
+            amount = state.trade_amount
+            success, order_id = broker.place_trade(direction, amount=amount)
+            risk.record_trade(amount)
+
+            trade_entry = {
+                "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+                "direction": direction,
+                "amount": amount,
+                "pair": config.PAIR,
+                "expiration": config.EXPIRATION_MINUTES,
+                "order_id": order_id if success else None,
+                "result": "pending" if success else "failed",
+                "pnl": None,
+            }
+            state.add_trade(trade_entry)
 
             if not success:
                 log.error("Trade failed: %s", order_id)
                 time.sleep(config.POLL_SECONDS)
                 continue
 
-            log.info("Trade placed: %s amount=%s order_id=%s", direction, config.TRADE_AMOUNT, order_id)
+            log.info("Trade placed: %s amount=%s order_id=%s", direction, amount, order_id)
 
             time.sleep(config.EXPIRATION_MINUTES * 60 + 5)
             result = broker.get_trade_result(order_id)
-            risk.record_result(result, config.TRADE_AMOUNT)
+            risk.record_result(result, amount)
+
+            # Update the trade entry in-place (deque holds a reference to same dict)
+            trade_entry["result"] = result
+            trade_entry["pnl"] = round(risk.pnl_today, 2)
+
+            # Sync performance metrics to state
+            completed = [t for t in state.trades if t.get("result") in ("win", "loss")]
+            wins = [t for t in completed if t["result"] == "win"]
+            state.update(
+                daily_pnl=risk.pnl_today,
+                trades_today=risk.trades_today,
+                consecutive_losses=risk.consecutive_losses,
+                win_rate=(len(wins) / len(completed) * 100) if completed else 0.0,
+            )
+            state.pnl_history.append(risk.pnl_today)
+
             log.info("Trade result: %s | daily P&L (approx): %.2f", result, risk.pnl_today)
 
         except Exception as e:
             log.error("Error in main loop: %s. Reconnecting in 15s...", e)
+            state.update(connected=False, last_signal_text="Error: %s. Reconnecting…" % e)
             time.sleep(15)
             try:
                 broker.connect()
+                state.update(connected=True)
             except Exception as e2:
                 log.error("Reconnect failed: %s", e2)
 
 
 def _summarize(info):
     if not isinstance(info, dict):
-        return info
+        return str(info)
     keys_of_interest = ("price", "score", "reason", "upper_band", "lower_band")
     parts = []
     for k in keys_of_interest:
@@ -150,4 +252,4 @@ def _summarize(info):
 
 
 if __name__ == "__main__":
-    main()
+    run_bot()

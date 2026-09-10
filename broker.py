@@ -25,10 +25,19 @@ def _parse_proxy():
         return None
     if "://" not in raw:
         raw = "http://" + raw
-    p = urlparse(raw)
+    try:
+        p = urlparse(raw)
+    except Exception as e:
+        log.error("IQ_PROXY URL could not be parsed (%s): %s", e, raw)
+        return None
     scheme = p.scheme or "http"
     host = p.hostname
-    port = p.port or (1080 if scheme.startswith("socks") else 8080)
+    try:
+        port = p.port or (1080 if scheme.startswith("socks") else 8080)
+    except ValueError as e:
+        log.error("IQ_PROXY has an invalid port (%s). Expected format: "
+                  "http://user:pass@host:port or socks5://host:port", e)
+        return None
     auth = None
     if p.username and p.password:
         auth = (p.username, p.password)

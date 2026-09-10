@@ -104,7 +104,7 @@ def run_bot():
             else:
                 status = "Connection failed: %s" % text
             if attempt == 1:
-                log.error("%s Retrying with backoff.", status)
+                log.warning("%s Retrying with backoff.", status)
             else:
                 log.info("Still not connected (attempt %d) — next try in %ds.", attempt, delay)
             state.update(connected=False, last_signal_text=status)

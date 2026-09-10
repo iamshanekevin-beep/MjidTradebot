@@ -10,6 +10,12 @@ from bot_state import state
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bot")
 
+# The iqoptionapi library logs the raw socket/SSL failure itself on every
+# attempt. We already report connection state in one clear line, so silence
+# the library's duplicate error output.
+for _noisy in ("iqoptionapi", "iqoptionapi.ws.client", "websocket"):
+    logging.getLogger(_noisy).setLevel(logging.CRITICAL)
+
 
 class RiskState:
     def __init__(self):

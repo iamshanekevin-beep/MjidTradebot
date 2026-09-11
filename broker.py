@@ -18,63 +18,121 @@ import config
 log = logging.getLogger("broker")
 
 # ---------------------------------------------------------------------------
-# Proxy support — IQ Option blocks direct connections from many server IPs.
-# Set IQ_PROXY in the environment (e.g. http://user:pass@host:port) to route
-# both the HTTP login and the WebSocket through a proxy.
+# Proxy + host patching
+#
+# IQ Option's main domain (iqoption.com / auth.iqoption.com) is blocked from
+# many server IPs. The rebranded domain auth.iqbroker.com is reachable, and
+# ws.iqoption.com still serves the WebSocket. We patch the library to:
+#   - route HTTP login  through auth.iqbroker.com
+#   - route WebSocket  through ws.iqoption.com
+#   - send both through a SOCKS5/HTTP proxy if IQ_PROXY is set
 # ---------------------------------------------------------------------------
 _PROXY_URL = os.getenv("IQ_PROXY", "").strip()
 _PROXY_DICT = None
-if _PROXY_URL:
-    _PROXY_DICT = {"http": _PROXY_URL, "https": _PROXY_URL}
-    _parsed = urlparse(_PROXY_URL)
-    _WS_PROXY_KW = {}
-    if _parsed.hostname:
-        _WS_PROXY_KW["http_proxy_host"] = _parsed.hostname
-    if _parsed.port:
-        _WS_PROXY_KW["http_proxy_port"] = _parsed.port
-    if _parsed.username:
-        import base64
-        cred = f"{_parsed.username}:{_parsed.password or ''}"
-        _WS_PROXY_KW["http_proxy_auth"] = (
-            _parsed.username,
-            _parsed.password or "",
-        )
+_WS_PROXY_KW = {}
 
-    # Patch IQOptionAPI.__init__ so HTTP requests use the proxy
+if _PROXY_URL:
+    _parsed = urlparse(_PROXY_URL)
+    _PROXY_DICT = {"http": _PROXY_URL, "https": _PROXY_URL}
+
+    _proxy_host = _parsed.hostname
+    _proxy_port = _parsed.port
+    _proxy_auth = (_parsed.username, _parsed.password) if _parsed.username else None
+
+    # websocket-client run_forever params
+    _WS_PROXY_KW["http_proxy_host"] = _proxy_host
+    _WS_PROXY_KW["http_proxy_port"] = _proxy_port
+    if _proxy_auth:
+        _WS_PROXY_KW["http_proxy_auth"] = _proxy_auth
+    # socks5:// → proxy_type "socks5", http:// → omit (defaults to HTTP CONNECT)
+    if _parsed.scheme in ("socks5", "socks5h"):
+        _WS_PROXY_KW["proxy_type"] = "socks5"
+
+    # Inject proxy into IQOptionAPI HTTP session
     _orig_init = IQOptionAPI.__init__
     def _patched_init(self, host, username, password, proxies=None):
         _orig_init(self, host, username, password, proxies or _PROXY_DICT)
     IQOptionAPI.__init__ = _patched_init
 
-    # Patch start_websocket so the WebSocket also uses the proxy
+    # Patch start_websocket to route through proxy
+    import ssl as _ssl
+    import threading as _threading
+    import iqoptionapi.global_value as _global_value
+    try:
+        from iqoptionapi.ws.client import WebsocketClient as _WSClient
+    except Exception:
+        from iqoptionapi.ws.client_old import WebsocketClient as _WSClient
+
     _orig_start_ws = IQOptionAPI.start_websocket
     def _patched_start_ws(self):
-        global_value = __import__("iqoptionapi.global_value", fromlist=["global_value"])
-        global_value.check_websocket_if_connect = None
-        global_value.check_websocket_if_error = False
-        global_value.websocket_error_reason = None
-        from iqoptionapi.ws.client import WebsocketClient
-        self.websocket_client = WebsocketClient(self)
-        import ssl
-        self.websocket_thread = __import__("threading").Thread(
+        _global_value.check_websocket_if_connect = None
+        _global_value.check_websocket_if_error = False
+        _global_value.websocket_error_reason = None
+        self.websocket_client = _WSClient(self)
+        self.websocket_thread = _threading.Thread(
             target=self.websocket.run_forever,
-            kwargs={"sslopt": {"check_hostname": False, "cert_reqs": ssl.CERT_NONE, "ca_certs": "cacert.pem"},
-                    **_WS_PROXY_KW},
+            kwargs={
+                "sslopt": {"check_hostname": False, "cert_reqs": _ssl.CERT_NONE, "ca_certs": "cacert.pem"},
+                **_WS_PROXY_KW,
+            },
         )
         self.websocket_thread.daemon = True
         self.websocket_thread.start()
         while True:
-            if global_value.check_websocket_if_error:
-                return False, global_value.websocket_error_reason
-            if global_value.check_websocket_if_connect == 0:
+            if _global_value.check_websocket_if_error:
+                return False, _global_value.websocket_error_reason
+            if _global_value.check_websocket_if_connect == 0:
                 return False, "Websocket connection closed."
-            elif global_value.check_websocket_if_connect == 1:
+            elif _global_value.check_websocket_if_connect == 1:
                 return True, None
     IQOptionAPI.start_websocket = _patched_start_ws
 
-    log.info("Proxy enabled: %s:%s", _parsed.hostname, _parsed.port)
+    log.info("Proxy enabled: %s://%s:%s", _parsed.scheme, _proxy_host, _proxy_port)
 else:
     log.info("No proxy configured (IQ_PROXY not set) — connecting directly.")
+
+# ---------------------------------------------------------------------------
+# Host redirection — use reachable domains instead of blocked iqoption.com
+# ---------------------------------------------------------------------------
+_orig_connect = IQ_Option.connect
+def _patched_connect(self):
+    try:
+        self.api.close()
+    except Exception:
+        pass
+    # ws.iqoption.com is reachable (even when iqoption.com is blocked) and
+    # serves the same /echo/websocket endpoint.
+    self.api = IQOptionAPI("ws.iqoption.com", self.email, self.password)
+    self.api.set_session(headers=self.SESSION_HEADER, cookies=self.SESSION_COOKIE)
+    check, reason = self.api.connect()
+    if check:
+        self.re_subscribe_stream()
+        import iqoptionapi.global_value as gv
+        while gv.global_value.balance_id is None:
+            pass
+        self.position_change_all("subscribeMessage", gv.global_value.balance_id)
+        self.order_changed_all("subscribeMessage")
+        self.api.setOptions(1, True)
+        return True, None
+    return False, reason
+IQ_Option.connect = _patched_connect
+
+# Patch login/logout URLs: auth.iqoption.com → auth.iqbroker.com (reachable)
+try:
+    from iqoptionapi.http.login import Login as _Login
+    _Login._post = lambda self, data=None, headers=None: self.api.send_http_request_v2(
+        method="POST", url="https://auth.iqbroker.com/api/v2/login",
+        data=data, headers=headers)
+except Exception as e:
+    log.warning("Could not patch Login URL: %s", e)
+
+try:
+    from iqoptionapi.http.logout import Logout as _Logout
+    _Logout._post = lambda self, data=None, headers=None: self.api.send_http_request_v2(
+        method="POST", url="https://auth.iqbroker.com/api/v1.0/logout",
+        data=data, headers=headers)
+except Exception as e:
+    log.warning("Could not patch Logout URL: %s", e)
 
 
 class Broker:
